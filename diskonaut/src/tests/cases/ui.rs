@@ -14,22 +14,13 @@ use crate::tests::fakes::TerminalEvents;
 
 macro_rules! key {
     (char $x:expr) => {
-        Event::Key(KeyEvent {
-            code: KeyCode::Char($x),
-            modifiers: KeyModifiers::NONE,
-        })
+        Event::Key(KeyEvent::new(KeyCode::Char($x), KeyModifiers::NONE))
     };
     (ctrl $x:expr) => {
-        Event::Key(KeyEvent {
-            code: KeyCode::Char($x),
-            modifiers: KeyModifiers::CONTROL,
-        })
+        Event::Key(KeyEvent::new(KeyCode::Char($x), KeyModifiers::CONTROL))
     };
     ($x:ident) => {
-        Event::Key(KeyEvent {
-            code: KeyCode::$x,
-            modifiers: KeyModifiers::NONE,
-        })
+        Event::Key(KeyEvent::new(KeyCode::$x, KeyModifiers::NONE))
     };
 }
 // this means we ask diskonaut to show the actual file size rather than the size taken on disk

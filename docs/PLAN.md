@@ -208,8 +208,8 @@ Phased: port highest-value scenarios first (navigation, delete, permission denie
 
 ### Phase 4 — `ratatui` migration
 
-- [ ] All UI under `diskonaut/src/ui/` on ratatui.
-- [ ] Update `TestBackend` for ratatui.
+- [x] All UI under `diskonaut/src/ui/` on ratatui.
+- [x] Update `TestBackend` for ratatui.
 
 **Verify:** manual TUI smoke test; compile all integration tests.
 

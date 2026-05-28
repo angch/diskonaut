@@ -11,7 +11,4 @@ pub enum Error {
 
     #[error(transparent)]
     Io(#[from] std::io::Error),
-
-    #[error(transparent)]
-    Terminal(#[from] crossterm::ErrorKind),
 }

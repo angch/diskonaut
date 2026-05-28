@@ -1,7 +1,7 @@
+use ::ratatui::Terminal;
+use ::ratatui::backend::Backend;
+use ::ratatui::layout::{Constraint, Direction, Layout, Rect};
 use ::std::path::PathBuf;
-use ::tui::Terminal;
-use ::tui::backend::Backend;
-use ::tui::layout::{Constraint, Direction, Layout, Rect};
 
 use libdiskonaut::FileTree;
 use libdiskonaut::tiles::{Area, Board};
@@ -37,7 +37,8 @@ where
         Display { terminal }
     }
     pub fn size(&self) -> Rect {
-        self.terminal.size().expect("could not get terminal size")
+        let size = self.terminal.size().expect("could not get terminal size");
+        Rect::new(0, 0, size.width, size.height)
     }
     pub fn render(
         &mut self,
@@ -48,7 +49,7 @@ where
     ) {
         self.terminal
             .draw(|f| {
-                let full_screen = f.size();
+                let full_screen = f.area();
                 let current_path = file_tree.get_current_path();
                 let current_path_size = file_tree.get_current_folder_size();
                 let current_path_descendants = file_tree.get_current_folder().num_descendants;
@@ -65,7 +66,7 @@ where
                     size: base_path_size,
                     num_descendants: base_path_descendants,
                 };
-                let mut chunks = Layout::default()
+                let chunks = Layout::default()
                     .direction(Direction::Vertical)
                     .margin(0)
                     .constraints(
@@ -79,14 +80,17 @@ where
                     .split(full_screen);
 
                 // -1 cos we draw starting at offset 1 in both x and y directions
-
-                chunks[1].width -= 1;
-                chunks[1].height -= 1;
-                board.change_area(&Area {
+                let grid_area = Rect {
                     x: chunks[1].x,
                     y: chunks[1].y,
-                    width: chunks[1].width,
-                    height: chunks[1].height,
+                    width: chunks[1].width.saturating_sub(1),
+                    height: chunks[1].height.saturating_sub(1),
+                };
+                board.change_area(&Area {
+                    x: grid_area.x,
+                    y: grid_area.y,
+                    width: grid_area.width,
+                    height: grid_area.height,
                 });
                 match ui_mode {
                     UiMode::Loading => {
@@ -109,7 +113,7 @@ where
                                 board.unrenderable_tile_coordinates,
                                 board.selected_index,
                             ),
-                            chunks[1],
+                            grid_area,
                         );
                         f.render_widget(
                             BottomLine::new()
@@ -141,7 +145,7 @@ where
                                 board.unrenderable_tile_coordinates,
                                 board.selected_index,
                             ),
-                            chunks[1],
+                            grid_area,
                         );
                         f.render_widget(
                             BottomLine::new()
@@ -173,7 +177,7 @@ where
                                 board.unrenderable_tile_coordinates,
                                 board.selected_index,
                             ),
-                            chunks[1],
+                            grid_area,
                         );
                         f.render_widget(
                             BottomLine::new()
@@ -207,7 +211,7 @@ where
                                 board.unrenderable_tile_coordinates,
                                 board.selected_index,
                             ),
-                            chunks[1],
+                            grid_area,
                         );
                         f.render_widget(
                             BottomLine::new()
@@ -275,7 +279,7 @@ where
                                 board.unrenderable_tile_coordinates,
                                 board.selected_index,
                             ),
-                            chunks[1],
+                            grid_area,
                         );
                         f.render_widget(ConfirmBox::new(), full_screen);
                     }
@@ -298,7 +302,7 @@ where
                                 board.unrenderable_tile_coordinates,
                                 board.selected_index,
                             ),
-                            chunks[1],
+                            grid_area,
                         );
                         f.render_widget(
                             BottomLine::new()

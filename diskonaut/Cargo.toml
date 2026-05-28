@@ -19,7 +19,7 @@ clap = { workspace = true }
 crossterm = { workspace = true }
 libdiskonaut = { workspace = true }
 thiserror = { workspace = true }
-tui = { workspace = true }
+ratatui = { workspace = true }
 unicode-width = { workspace = true }
 
 [dev-dependencies]

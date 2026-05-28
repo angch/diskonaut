@@ -1,8 +1,8 @@
+use ::ratatui::backend::Backend;
 use ::std::fs::{self, Metadata};
 use ::std::mem::ManuallyDrop;
 use ::std::path::PathBuf;
 use ::std::sync::mpsc::{Receiver, SyncSender};
-use ::tui::backend::Backend;
 
 use libdiskonaut::tiles::Board;
 use libdiskonaut::{FileOrFolder, FileToDelete, FileTree, Folder};

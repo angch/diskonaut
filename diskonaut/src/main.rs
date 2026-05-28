@@ -22,11 +22,11 @@ use clap::Parser;
 use error::Error;
 use libdiskonaut::{ScanItem, ScanOptions, scan_folder};
 
-use ::tui::backend::Backend;
+use ::ratatui::backend::Backend;
 use crossterm::event::KeyModifiers;
 use crossterm::event::{Event as BackEvent, KeyCode, KeyEvent};
 use crossterm::terminal::{disable_raw_mode, enable_raw_mode};
-use tui::backend::CrosstermBackend;
+use ratatui::backend::CrosstermBackend;
 
 use app::{App, UiMode};
 use input::TerminalEvents;
@@ -147,14 +147,17 @@ pub fn start<B>(
                         if let BackEvent::Key(KeyEvent {
                             code: KeyCode::Char('y'),
                             modifiers: KeyModifiers::NONE,
+                            ..
                         })
                         | BackEvent::Key(KeyEvent {
                             code: KeyCode::Char('q'),
                             modifiers: KeyModifiers::NONE,
+                            ..
                         })
                         | BackEvent::Key(KeyEvent {
                             code: KeyCode::Char('c'),
                             modifiers: KeyModifiers::CONTROL,
+                            ..
                         }) = evt
                         {
                             // not ideal, but works in a pinch

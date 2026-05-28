@@ -1,4 +1,4 @@
-use ::tui::backend::Backend;
+use ::ratatui::backend::Backend;
 use crossterm::event::Event;
 use crossterm::event::KeyModifiers;
 use crossterm::event::{KeyCode, KeyEvent, read};
@@ -20,24 +20,28 @@ macro_rules! key {
         Event::Key(KeyEvent {
             code: KeyCode::Char($x),
             modifiers: KeyModifiers::NONE,
+            ..
         })
     };
     (shift $x:expr) => {
         Event::Key(KeyEvent {
             code: KeyCode::Char($x),
             modifiers: KeyModifiers::SHIFT,
+            ..
         })
     };
     (ctrl $x:expr) => {
         Event::Key(KeyEvent {
             code: KeyCode::Char($x),
             modifiers: KeyModifiers::CONTROL,
+            ..
         })
     };
     ($x:ident) => {
         Event::Key(KeyEvent {
             code: KeyCode::$x,
             modifiers: KeyModifiers::NONE,
+            ..
         })
     };
 }

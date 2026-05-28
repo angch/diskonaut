@@ -19,7 +19,10 @@ fn size_on_disk_fast_is_at_least_file_length() {
     let metadata = std::fs::metadata(&file_path).expect("stat file");
     let on_disk = crate::os::size_on_disk_fast(&metadata);
 
-    assert!(on_disk >= 1024, "on-disk size {on_disk} should cover 1024 logical bytes");
+    assert!(
+        on_disk >= 1024,
+        "on-disk size {on_disk} should cover 1024 logical bytes"
+    );
 
     let _ = std::fs::remove_dir_all(&dir);
 }

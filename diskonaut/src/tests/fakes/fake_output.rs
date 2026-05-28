@@ -1,9 +1,9 @@
+use ::ratatui::backend::{Backend, ClearType, WindowSize};
+use ::ratatui::buffer::Cell;
+use ::ratatui::layout::{Position, Size};
 use ::std::collections::HashMap;
 use ::std::io;
 use ::std::sync::{Arc, Mutex};
-use ::tui::backend::Backend;
-use ::tui::buffer::Cell;
-use ::tui::layout::Rect;
 
 #[derive(Hash, Debug, PartialEq)]
 pub enum TerminalEvent {
@@ -36,6 +36,15 @@ impl TestBackend {
             terminal_height,
         }
     }
+
+    fn terminal_size(&self) -> Size {
+        let terminal_height = self.terminal_height.lock().unwrap();
+        let terminal_width = self.terminal_width.lock().unwrap();
+        Size {
+            width: *terminal_width,
+            height: *terminal_height,
+        }
+    }
 }
 
 #[derive(Hash, Eq, PartialEq)]
@@ -45,31 +54,43 @@ struct Point {
 }
 
 impl Backend for TestBackend {
-    fn clear(&mut self) -> io::Result<()> {
+    type Error = io::Error;
+
+    fn clear(&mut self) -> Result<(), Self::Error> {
         self.events.lock().unwrap().push(TerminalEvent::Clear);
         Ok(())
     }
 
-    fn hide_cursor(&mut self) -> io::Result<()> {
+    fn clear_region(&mut self, clear_type: ClearType) -> Result<(), Self::Error> {
+        if clear_type == ClearType::All {
+            self.clear()?;
+        }
+        Ok(())
+    }
+
+    fn hide_cursor(&mut self) -> Result<(), Self::Error> {
         self.events.lock().unwrap().push(TerminalEvent::HideCursor);
         Ok(())
     }
 
-    fn show_cursor(&mut self) -> io::Result<()> {
+    fn show_cursor(&mut self) -> Result<(), Self::Error> {
         self.events.lock().unwrap().push(TerminalEvent::ShowCursor);
         Ok(())
     }
 
-    fn get_cursor(&mut self) -> io::Result<(u16, u16)> {
+    fn get_cursor_position(&mut self) -> Result<Position, Self::Error> {
         self.events.lock().unwrap().push(TerminalEvent::GetCursor);
-        Ok((0, 0))
+        Ok(Position { x: 0, y: 0 })
     }
 
-    fn set_cursor(&mut self, _x: u16, _y: u16) -> io::Result<()> {
+    fn set_cursor_position<P>(&mut self, _position: P) -> Result<(), Self::Error>
+    where
+        P: Into<Position>,
+    {
         Ok(())
     }
 
-    fn draw<'a, I>(&mut self, content: I) -> io::Result<()>
+    fn draw<'a, I>(&mut self, content: I) -> Result<(), Self::Error>
     where
         I: Iterator<Item = (u16, u16, &'a Cell)>,
     {
@@ -79,15 +100,17 @@ impl Backend for TestBackend {
         for (x, y, cell) in content {
             coordinates.insert(Point { x, y }, cell);
         }
-        let terminal_height = self.terminal_height.lock().unwrap();
-        let terminal_width = self.terminal_width.lock().unwrap();
-        for y in 0..*terminal_height {
-            for x in 0..*terminal_width {
+        let Size {
+            width: terminal_width,
+            height: terminal_height,
+        } = self.terminal_size();
+        for y in 0..terminal_height {
+            for x in 0..terminal_width {
                 match coordinates.get(&Point { x, y }) {
                     Some(cell) => {
                         // this will contain no style information at all
                         // should be good enough for testing
-                        string.push_str(&cell.symbol);
+                        string.push_str(cell.symbol());
                     }
                     None => {
                         string.push(' ');
@@ -100,14 +123,22 @@ impl Backend for TestBackend {
         Ok(())
     }
 
-    fn size(&self) -> io::Result<Rect> {
-        let terminal_height = self.terminal_height.lock().unwrap();
-        let terminal_width = self.terminal_width.lock().unwrap();
-
-        Ok(Rect::new(0, 0, *terminal_width, *terminal_height))
+    fn size(&self) -> Result<Size, Self::Error> {
+        Ok(self.terminal_size())
     }
 
-    fn flush(&mut self) -> io::Result<()> {
+    fn window_size(&mut self) -> Result<WindowSize, Self::Error> {
+        let columns_rows = self.terminal_size();
+        Ok(WindowSize {
+            columns_rows,
+            pixels: Size {
+                width: 0,
+                height: 0,
+            },
+        })
+    }
+
+    fn flush(&mut self) -> Result<(), Self::Error> {
         self.events.lock().unwrap().push(TerminalEvent::Flush);
         Ok(())
     }
