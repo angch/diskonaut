@@ -13,6 +13,7 @@ fn parses_defaults() {
         Opt {
             folder: None,
             apparent_size: false,
+            config: None,
         }
     );
 }
@@ -25,6 +26,7 @@ fn parses_apparent_size_and_folder() {
         Opt {
             folder: Some(PathBuf::from("/tmp")),
             apparent_size: true,
+            config: None,
         }
     );
 }
@@ -41,6 +43,7 @@ fn resolve_folder_errors_for_missing_path() {
     let opt = Opt {
         folder: Some(PathBuf::from("/nonexistent_diskonaut_test_path_9f3c2a")),
         apparent_size: false,
+        config: None,
     };
     let err = opt.resolve_folder().unwrap_err();
     assert!(matches!(err, Error::FolderNotFound(_)));

@@ -9,6 +9,7 @@ use super::controls::{
     handle_keypress_normal_mode, handle_keypress_screen_too_small,
 };
 use crate::app::{App, UiMode};
+use crate::config::Keybinds;
 
 fn key_char(c: char) -> Event {
     Event::Key(KeyEvent::new(KeyCode::Char(c), KeyModifiers::NONE))
@@ -18,7 +19,13 @@ fn test_app(width: u16, height: u16) -> App<TestBackend> {
     let dir = std::env::temp_dir().join("diskonaut_input_test");
     let _ = std::fs::create_dir_all(&dir);
     let (tx, _rx) = mpsc::sync_channel(1);
-    App::new(TestBackend::new(width, height), dir, tx, true)
+    App::new(
+        TestBackend::new(width, height),
+        dir,
+        tx,
+        true,
+        Keybinds::default(),
+    )
 }
 
 #[test]

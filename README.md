@@ -41,12 +41,28 @@ diskonaut ~/Downloads
 
 # Show logical sizes (useful on compressed or sparse filesystems)
 diskonaut -a /var/log
-
-# Delete without a confirmation prompt (use with care)
-diskonaut -x /tmp/staging
 ```
 
 Run `diskonaut --help` for the full option list.
+
+## Configuration
+
+Optional TOML config (see [example/config.toml](example/config.toml)):
+
+- Default path: `~/.config/diskonaut/config.toml`
+- Override path: `diskonaut -c /path/to/config.toml`
+
+```toml
+version = 1
+
+[base]
+apparent-size = false   # same as -a when not passed on the CLI
+
+[keybinds]
+delete = "d"            # override any action key (enter, escape, ctrl+c, …)
+```
+
+CLI `-a` / `--apparent-size` ORs with `[base] apparent-size`. Unlisted keybinds keep built-in defaults. Arrow keys and Ctrl+f/b/n/p still work for movement alongside configured vim-style keys.
 
 ## Keyboard shortcuts
 
@@ -72,6 +88,7 @@ Arguments:
 
 Options:
   -a, --apparent-size   Show file size instead of on-disk usage
+  -c, --config FILE     Path to config file
   -h, --help            Print help
 ```
 

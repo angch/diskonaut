@@ -8,6 +8,7 @@ use libdiskonaut::{ScanItem, ScanOptions, scan_folder};
 use ratatui::backend::TestBackend;
 
 use super::{App, UiMode};
+use crate::config::Keybinds;
 
 fn temp_app_dir(name: &str) -> PathBuf {
     let dir = std::env::temp_dir().join(format!("diskonaut_app_test_{name}"));
@@ -18,7 +19,13 @@ fn temp_app_dir(name: &str) -> PathBuf {
 
 fn app_with_scanned_dir(dir: &PathBuf, width: u16, height: u16) -> App<TestBackend> {
     let (tx, _rx) = mpsc::sync_channel(1);
-    let mut app = App::new(TestBackend::new(width, height), dir.clone(), tx, true);
+    let mut app = App::new(
+        TestBackend::new(width, height),
+        dir.clone(),
+        tx,
+        true,
+        Keybinds::default(),
+    );
     let options = ScanOptions {
         parallel: false,
         show_apparent_size: true,
@@ -92,7 +99,13 @@ fn prompt_file_deletion_shows_confirmation() {
     File::create(&target).expect("create file");
 
     let (tx, _rx) = mpsc::sync_channel(1);
-    let mut app = App::new(TestBackend::new(80, 24), dir.clone(), tx, true);
+    let mut app = App::new(
+        TestBackend::new(80, 24),
+        dir.clone(),
+        tx,
+        true,
+        Keybinds::default(),
+    );
     let meta = fs::metadata(&target).expect("metadata");
     app.add_entry_to_base_folder(&meta, target.clone());
     app.start_ui();

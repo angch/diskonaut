@@ -8,6 +8,7 @@ use libdiskonaut::tiles::Board;
 use libdiskonaut::{FileOrFolder, FileToDelete, FileTree, Folder};
 
 use crate::Event;
+use crate::config::Keybinds;
 use crate::messages::{Instruction, handle_instructions};
 use crate::state::UiEffects;
 use crate::ui::Display;
@@ -38,6 +39,7 @@ where
     display: Display<B>,
     event_sender: SyncSender<Event>,
     ui_effects: UiEffects,
+    pub keybinds: Keybinds,
 }
 
 impl<B> App<B>
@@ -49,6 +51,7 @@ where
         path_in_filesystem: PathBuf,
         event_sender: SyncSender<Event>,
         show_apparent_size: bool,
+        keybinds: Keybinds,
     ) -> Self {
         let display = Display::new(terminal_backend);
         let board = Board::new(&Folder::new(&path_in_filesystem));
@@ -69,6 +72,7 @@ where
             ui_mode: UiMode::Loading,
             event_sender,
             ui_effects,
+            keybinds,
         }
     }
     pub fn start(&mut self, receiver: Receiver<Instruction>) {

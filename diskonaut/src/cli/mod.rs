@@ -13,6 +13,9 @@ pub struct Opt {
     /// Show file sizes rather than their block usage on disk
     #[arg(short, long)]
     pub apparent_size: bool,
+    /// Path to config file (default: `~/.config/diskonaut/config.toml`)
+    #[arg(short = 'c', long, value_name = "FILE")]
+    pub config: Option<PathBuf>,
 }
 
 impl Opt {
