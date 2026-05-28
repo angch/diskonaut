@@ -304,15 +304,6 @@ dependencies = [
 ]
 
 [[package]]
-name = "filesize"
-version = "0.2.0"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "12d741e2415d4e2e5bd1c1d00409d1a8865a57892c2d689b504365655d237d43"
-dependencies = [
- "winapi",
-]
-
-[[package]]
 name = "heck"
 version = "0.5.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -379,7 +370,6 @@ checksum = "68ab91017fe16c622486840e4c83c9a37afeff978bd239b5293d61ece587de66"
 name = "libdiskonaut"
 version = "0.11.0"
 dependencies = [
- "filesize",
  "jwalk",
  "rustix",
  "thiserror",

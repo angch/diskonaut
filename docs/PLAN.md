@@ -202,7 +202,7 @@ Phased: port highest-value scenarios first (navigation, delete, permission denie
 ### Phase 3 — Walker + block size
 
 - [x] `jwalk` 0.8 (or chosen walker).
-- [ ] Inline block-size; remove `filesize`.
+- [x] Inline block-size; remove `filesize`.
 
 **Verify:** scan tests + manual run on large directory.
 
