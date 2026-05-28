@@ -186,9 +186,9 @@ Phased: port highest-value scenarios first (navigation, delete, permission denie
 
 ### Phase 1 — `libdiskonaut` extraction
 
-- [ ] `scan/`, `model/`, `tiles/`, `format/`, `os/` with `tests.rs` siblings.
-- [ ] Public API: `scan_folder`, `FileTree`, treemap types used by the binary.
-- [ ] No `ratatui` in lib.
+- [x] `scan/`, `model/`, `tiles/`, `format/`, `os/` with `tests.rs` siblings.
+- [x] Public API: `scan_folder`, `FileTree`, treemap types used by the binary.
+- [x] No `ratatui` in lib.
 
 **Verify:** lib unit tests; binary still runs (thin wrapper).
 
