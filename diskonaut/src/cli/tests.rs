@@ -13,34 +13,28 @@ fn parses_defaults() {
         Opt {
             folder: None,
             apparent_size: false,
-            disable_delete_confirmation: false,
+            config: None,
         }
     );
 }
 
 #[test]
-fn parses_apparent_size_and_disable_delete_confirmation() {
-    let opt = Opt::parse_from(["diskonaut", "-a", "-x", "/tmp"]);
+fn parses_apparent_size_and_folder() {
+    let opt = Opt::parse_from(["diskonaut", "-a", "/tmp"]);
     assert_eq!(
         opt,
         Opt {
             folder: Some(PathBuf::from("/tmp")),
             apparent_size: true,
-            disable_delete_confirmation: true,
+            config: None,
         }
     );
 }
 
 #[test]
 fn parses_long_flags() {
-    let opt = Opt::parse_from([
-        "diskonaut",
-        "--apparent-size",
-        "--disable-delete-confirmation",
-        "/var",
-    ]);
+    let opt = Opt::parse_from(["diskonaut", "--apparent-size", "/var"]);
     assert!(opt.apparent_size);
-    assert!(opt.disable_delete_confirmation);
     assert_eq!(opt.folder, Some(PathBuf::from("/var")));
 }
 
@@ -49,7 +43,7 @@ fn resolve_folder_errors_for_missing_path() {
     let opt = Opt {
         folder: Some(PathBuf::from("/nonexistent_diskonaut_test_path_9f3c2a")),
         apparent_size: false,
-        disable_delete_confirmation: false,
+        config: None,
     };
     let err = opt.resolve_folder().unwrap_err();
     assert!(matches!(err, Error::FolderNotFound(_)));

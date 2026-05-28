@@ -6,6 +6,7 @@ license.workspace = true
 repository.workspace = true
 homepage.workspace = true
 description = "Disk usage model, treemap layout, and formatting for diskonaut."
+readme = "../README.md"
 
 [dependencies]
 jwalk = { workspace = true }

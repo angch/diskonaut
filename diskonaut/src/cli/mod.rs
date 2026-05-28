@@ -13,9 +13,9 @@ pub struct Opt {
     /// Show file sizes rather than their block usage on disk
     #[arg(short, long)]
     pub apparent_size: bool,
-    /// Don't ask for confirmation before deleting
-    #[arg(short = 'x', long)]
-    pub disable_delete_confirmation: bool,
+    /// Path to config file (default: `~/.config/diskonaut/config.toml`)
+    #[arg(short = 'c', long, value_name = "FILE")]
+    pub config: Option<PathBuf>,
 }
 
 impl Opt {

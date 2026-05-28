@@ -1,5 +1,6 @@
 mod app;
 mod cli;
+mod config;
 mod error;
 mod input;
 mod messages;
@@ -21,13 +22,13 @@ use error::Error;
 use libdiskonaut::{ScanItem, ScanOptions, scan_folder};
 
 use ::ratatui::backend::Backend;
-use crossterm::event::KeyModifiers;
-use crossterm::event::{Event as BackEvent, KeyCode, KeyEvent};
+use crossterm::event::Event as BackEvent;
 use crossterm::terminal::{disable_raw_mode, enable_raw_mode};
 use ratatui::backend::CrosstermBackend;
 
 use app::{App, UiMode};
-use input::TerminalEvents;
+use config::DiskonautConfig;
+use input::{TerminalEvents, needs_quit_delay};
 use messages::{Event, Instruction, handle_events};
 
 fn main() {
@@ -43,6 +44,24 @@ fn get_stdout() -> io::Result<io::Stdout> {
 fn try_main() -> Result<(), Error> {
     let opts = Opt::parse();
 
+    let config_path = opts
+        .config
+        .clone()
+        .or_else(config::default_config_path)
+        .unwrap_or_else(|| PathBuf::from("config"));
+    let diskonaut_config =
+        DiskonautConfig::load(opts.config.as_deref()).map_err(|source| Error::Config {
+            path: config_path.clone(),
+            source,
+        })?;
+    let keybinds = diskonaut_config
+        .keybinds()
+        .map_err(|source| Error::Config {
+            path: config_path,
+            source,
+        })?;
+    let show_apparent_size = opts.apparent_size || diskonaut_config.base.apparent_size;
+
     match get_stdout() {
         Ok(stdout) => {
             enable_raw_mode()?;
@@ -53,8 +72,8 @@ fn try_main() -> Result<(), Error> {
                 terminal_backend,
                 Box::new(terminal_events),
                 folder,
-                opts.apparent_size,
-                opts.disable_delete_confirmation,
+                show_apparent_size,
+                keybinds,
             );
         }
         Err(_) => return Err(Error::NoStdout),
@@ -68,7 +87,7 @@ fn start<B>(
     terminal_events: Box<dyn Iterator<Item = BackEvent> + Send>,
     path: PathBuf,
     show_apparent_size: bool,
-    disable_delete_confirmation: bool,
+    keybinds: config::Keybinds,
 ) where
     B: Backend + Send + 'static,
 {
@@ -100,6 +119,7 @@ fn start<B>(
             .spawn({
                 let instruction_sender = instruction_sender.clone();
                 let running = running.clone();
+                let keybinds = keybinds.clone();
                 move || {
                     for evt in terminal_events {
                         if let BackEvent::Resize(_x, _y) = evt {
@@ -108,24 +128,13 @@ fn start<B>(
                             continue;
                         }
 
-                        if let BackEvent::Key(KeyEvent {
-                            code: KeyCode::Char('y'),
-                            modifiers: KeyModifiers::NONE,
-                            ..
-                        })
-                        | BackEvent::Key(KeyEvent {
-                            code: KeyCode::Char('q'),
-                            modifiers: KeyModifiers::NONE,
-                            ..
-                        })
-                        | BackEvent::Key(KeyEvent {
-                            code: KeyCode::Char('c'),
-                            modifiers: KeyModifiers::CONTROL,
-                            ..
-                        }) = evt
-                        {
+                        let delay =
+                            matches!(&evt, BackEvent::Key(_)) && needs_quit_delay(&evt, &keybinds);
+                        if instruction_sender.send(Instruction::Keypress(evt)).is_err() {
+                            break;
+                        }
+                        if delay {
                             // not ideal, but works in a pinch
-                            let _ = instruction_sender.send(Instruction::Keypress(evt));
                             park_timeout(time::Duration::from_millis(100));
                             // if we don't wait, the app won't have time to quit
                             if !running.load(Ordering::Acquire) {
@@ -135,8 +144,6 @@ fn start<B>(
                                 // we check "running"
                                 break;
                             }
-                        } else if instruction_sender.send(Instruction::Keypress(evt)).is_err() {
-                            break;
                         }
                     }
                 }
@@ -206,7 +213,7 @@ fn start<B>(
         path,
         event_sender,
         show_apparent_size,
-        disable_delete_confirmation,
+        keybinds,
     );
     app.start(instruction_receiver);
     running.store(false, Ordering::Release);

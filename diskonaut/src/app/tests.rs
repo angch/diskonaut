@@ -8,6 +8,7 @@ use libdiskonaut::{ScanItem, ScanOptions, scan_folder};
 use ratatui::backend::TestBackend;
 
 use super::{App, UiMode};
+use crate::config::Keybinds;
 
 fn temp_app_dir(name: &str) -> PathBuf {
     let dir = std::env::temp_dir().join(format!("diskonaut_app_test_{name}"));
@@ -23,7 +24,7 @@ fn app_with_scanned_dir(dir: &PathBuf, width: u16, height: u16) -> App<TestBacke
         dir.clone(),
         tx,
         true,
-        false,
+        Keybinds::default(),
     );
     let options = ScanOptions {
         parallel: false,
@@ -92,13 +93,19 @@ fn enter_selected_enters_subfolder() {
 }
 
 #[test]
-fn prompt_file_deletion_without_confirmation_deletes_immediately() {
-    let dir = temp_app_dir("delete_no_confirm");
+fn prompt_file_deletion_shows_confirmation() {
+    let dir = temp_app_dir("delete_confirm");
     let target = dir.join("remove_me.txt");
     File::create(&target).expect("create file");
 
     let (tx, _rx) = mpsc::sync_channel(1);
-    let mut app = App::new(TestBackend::new(80, 24), dir.clone(), tx, true, true);
+    let mut app = App::new(
+        TestBackend::new(80, 24),
+        dir.clone(),
+        tx,
+        true,
+        Keybinds::default(),
+    );
     let meta = fs::metadata(&target).expect("metadata");
     app.add_entry_to_base_folder(&meta, target.clone());
     app.start_ui();
@@ -111,10 +118,8 @@ fn prompt_file_deletion_without_confirmation_deletes_immediately() {
     app.board.set_selected_index(&file_index);
     app.prompt_file_deletion();
 
-    assert!(
-        !target.exists(),
-        "file should be deleted without confirmation prompt"
-    );
+    assert!(target.exists(), "file should remain until user confirms");
+    assert!(matches!(app.ui_mode, UiMode::DeleteFile(_)));
     let _ = fs::remove_dir_all(&dir);
 }
 

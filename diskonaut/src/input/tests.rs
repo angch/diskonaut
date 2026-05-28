@@ -9,16 +9,13 @@ use super::controls::{
     handle_keypress_normal_mode, handle_keypress_screen_too_small,
 };
 use crate::app::{App, UiMode};
+use crate::config::Keybinds;
 
 fn key_char(c: char) -> Event {
     Event::Key(KeyEvent::new(KeyCode::Char(c), KeyModifiers::NONE))
 }
 
-fn key_code(code: KeyCode) -> Event {
-    Event::Key(KeyEvent::new(code, KeyModifiers::NONE))
-}
-
-fn test_app(width: u16, height: u16, delete_without_confirm: bool) -> App<TestBackend> {
+fn test_app(width: u16, height: u16) -> App<TestBackend> {
     let dir = std::env::temp_dir().join("diskonaut_input_test");
     let _ = std::fs::create_dir_all(&dir);
     let (tx, _rx) = mpsc::sync_channel(1);
@@ -27,31 +24,31 @@ fn test_app(width: u16, height: u16, delete_without_confirm: bool) -> App<TestBa
         dir,
         tx,
         true,
-        delete_without_confirm,
+        Keybinds::default(),
     )
 }
 
 #[test]
 fn loading_mode_q_prompts_exit() {
-    let mut app = test_app(80, 24, false);
+    let mut app = test_app(80, 24);
     app.ui_mode = UiMode::Loading;
     handle_keypress_loading_mode(key_char('q'), &mut app);
     assert!(matches!(app.ui_mode, UiMode::Exiting { .. }));
 }
 
 #[test]
-fn normal_mode_backspace_opens_delete_flow() {
-    let mut app = test_app(80, 24, false);
+fn normal_mode_d_opens_delete_flow() {
+    let mut app = test_app(80, 24);
     app.ui_mode = UiMode::Normal;
     app.loaded = true;
-    handle_keypress_normal_mode(key_code(KeyCode::Backspace), &mut app);
+    handle_keypress_normal_mode(key_char('d'), &mut app);
     // Without a selected tile, mode stays normal.
     assert!(matches!(app.ui_mode, UiMode::Normal));
 }
 
 #[test]
 fn screen_too_small_ctrl_c_exits() {
-    let mut app = test_app(80, 24, false);
+    let mut app = test_app(80, 24);
     app.ui_mode = UiMode::ScreenTooSmall;
     handle_keypress_screen_too_small(
         Event::Key(KeyEvent::new(KeyCode::Char('c'), KeyModifiers::CONTROL)),
@@ -62,7 +59,7 @@ fn screen_too_small_ctrl_c_exits() {
 
 #[test]
 fn exiting_mode_y_quits() {
-    let mut app = test_app(80, 24, false);
+    let mut app = test_app(80, 24);
     app.ui_mode = UiMode::Exiting { app_loaded: true };
     handle_keypress_exiting_mode(key_char('y'), &mut app);
     assert!(!app.is_running);
@@ -70,7 +67,7 @@ fn exiting_mode_y_quits() {
 
 #[test]
 fn delete_mode_n_returns_to_normal() {
-    let mut app = test_app(80, 24, false);
+    let mut app = test_app(80, 24);
     let file = libdiskonaut::FileToDelete {
         path_in_filesystem: PathBuf::from("/tmp"),
         path_to_file: vec!["file".into()],

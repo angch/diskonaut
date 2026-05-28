@@ -8,6 +8,7 @@ use libdiskonaut::tiles::Board;
 use libdiskonaut::{FileOrFolder, FileToDelete, FileTree, Folder};
 
 use crate::Event;
+use crate::config::Keybinds;
 use crate::messages::{Instruction, handle_instructions};
 use crate::state::UiEffects;
 use crate::ui::Display;
@@ -38,7 +39,7 @@ where
     display: Display<B>,
     event_sender: SyncSender<Event>,
     ui_effects: UiEffects,
-    delete_confirmation_disabled: bool,
+    pub keybinds: Keybinds,
 }
 
 impl<B> App<B>
@@ -50,7 +51,7 @@ where
         path_in_filesystem: PathBuf,
         event_sender: SyncSender<Event>,
         show_apparent_size: bool,
-        disable_delete_confirmation: bool,
+        keybinds: Keybinds,
     ) -> Self {
         let display = Display::new(terminal_backend);
         let board = Board::new(&Folder::new(&path_in_filesystem));
@@ -71,7 +72,7 @@ where
             ui_mode: UiMode::Loading,
             event_sender,
             ui_effects,
-            delete_confirmation_disabled: disable_delete_confirmation,
+            keybinds,
         }
     }
     pub fn start(&mut self, receiver: Receiver<Instruction>) {
@@ -220,16 +221,8 @@ where
     }
     pub fn prompt_file_deletion(&mut self) {
         if let Some(file_to_delete) = self.get_file_to_delete() {
-            self.ui_mode = UiMode::DeleteFile(file_to_delete.clone());
-
-            if self.delete_confirmation_disabled {
-                // Here we just delete the file.
-                // As we have set the UI mode above we will get the deletion in progress message box instead of the prompt.
-                self.delete_file(&file_to_delete);
-            } else {
-                // Here we will render which will display the confirmation prompt
-                self.render();
-            }
+            self.ui_mode = UiMode::DeleteFile(file_to_delete);
+            self.render();
         }
     }
     pub fn normal_mode(&mut self) {
