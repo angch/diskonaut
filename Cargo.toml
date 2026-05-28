@@ -1,23 +1,24 @@
-[package]
-name = "diskonaut"
-description = "Terminal disk space visual navigator"
-version = "0.11.0"
-homepage = "https://github.com/Gigas002/diskonaut"
-repository = "https://github.com/Gigas002/diskonaut"
-license = "MIT"
-edition = "2018"
+[workspace]
+members = ["libdiskonaut", "diskonaut"]
+resolver = "3"
 
-[dependencies]
-tui = {version="0.11", default-features = false, features = ['crossterm'] }
+[workspace.package]
+edition = "2024"
+license = "MIT"
+homepage = "https://github.com/Gigas002/diskonaut"
+description = "Terminal disk space visual navigator"
+repository = "https://github.com/Gigas002/diskonaut"
+version = "0.11.0"
+
+[workspace.dependencies]
 crossterm = "0.17"
 failure = "0.1"
-jwalk = "0.5"
-structopt = "0.3"
 filesize = "0.2.0"
-unicode-width = "0.1.7"
-nix = "0.17.0"
-[target.'cfg(windows)'.dependencies]
-winapi = { version = "0.3", features = ["securitybaseapi","debugapi"] }
-
-[dev-dependencies]
 insta = "0.16.0"
+jwalk = "0.5"
+libdiskonaut = { path = "libdiskonaut" }
+nix = "0.17.0"
+structopt = "0.3"
+tui = { version = "0.11", default-features = false, features = ["crossterm"] }
+unicode-width = "0.1.7"
+winapi = { version = "0.3", features = ["securitybaseapi", "debugapi"] }

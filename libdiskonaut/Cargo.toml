@@ -1,0 +1,16 @@
+[package]
+name = "libdiskonaut"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+homepage.workspace = true
+description = "Disk usage model, treemap layout, and formatting for diskonaut."
+
+[dependencies]
+filesize = { workspace = true }
+nix = { workspace = true }
+unicode-width = { workspace = true }
+
+[target.'cfg(windows)'.dependencies]
+winapi = { workspace = true }
