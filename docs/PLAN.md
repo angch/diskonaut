@@ -220,7 +220,7 @@ Delete:
 
 ---
 
-## 8. Definition of done (v0.12 or next minor)
+## 8. Definition of done (v0.12.0)
 
 - [ ] Workspace `libdiskonaut` + `diskonaut` with tests colocated per module.
 - [ ] Edition 2024; ratatui; clap; rustix; no failure/nix/structopt/filesize/insta/windows (integration tests removed).
