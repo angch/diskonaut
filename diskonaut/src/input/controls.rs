@@ -75,7 +75,7 @@ pub fn handle_keypress_loading_mode<B: Backend>(evt: Event, app: &mut App<B>) {
         key!(char '\n') | key!(Enter) => {
             app.handle_enter();
         }
-        key!(Backspace) => {
+        key!(char 'd') => {
             app.show_warning_modal();
         }
         key!(Esc) => {
@@ -90,7 +90,7 @@ pub fn handle_keypress_normal_mode<B: Backend>(evt: Event, app: &mut App<B>) {
         key!(ctrl 'c') | key!(char 'q') => {
             app.prompt_exit();
         }
-        key!(Backspace) => {
+        key!(char 'd') => {
             app.prompt_file_deletion();
         }
         key!(char 'l') | key!(Right) | key!(ctrl 'f') => {

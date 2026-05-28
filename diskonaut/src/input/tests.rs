@@ -14,10 +14,6 @@ fn key_char(c: char) -> Event {
     Event::Key(KeyEvent::new(KeyCode::Char(c), KeyModifiers::NONE))
 }
 
-fn key_code(code: KeyCode) -> Event {
-    Event::Key(KeyEvent::new(code, KeyModifiers::NONE))
-}
-
 fn test_app(width: u16, height: u16) -> App<TestBackend> {
     let dir = std::env::temp_dir().join("diskonaut_input_test");
     let _ = std::fs::create_dir_all(&dir);
@@ -34,11 +30,11 @@ fn loading_mode_q_prompts_exit() {
 }
 
 #[test]
-fn normal_mode_backspace_opens_delete_flow() {
+fn normal_mode_d_opens_delete_flow() {
     let mut app = test_app(80, 24);
     app.ui_mode = UiMode::Normal;
     app.loaded = true;
-    handle_keypress_normal_mode(key_code(KeyCode::Backspace), &mut app);
+    handle_keypress_normal_mode(key_char('d'), &mut app);
     // Without a selected tile, mode stays normal.
     assert!(matches!(app.ui_mode, UiMode::Normal));
 }

@@ -55,7 +55,7 @@ Run `diskonaut --help` for the full option list.
 | `←` `→` `↑` `↓` or `h` `j` `k` `l` | Move selection |
 | `Enter` | Open folder |
 | `Esc` | Go to parent folder |
-| `Backspace` | Delete selected file or folder |
+| `d` | Delete selected file or folder |
 | `+` / `-` | Zoom in / out |
 | `0` | Reset zoom |
 | `q` or `Ctrl+C` | Quit (confirm with `y` when prompted) |

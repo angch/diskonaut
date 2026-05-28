@@ -7,6 +7,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Changed
+
+- Delete keybind: `Backspace` → `d`.
+
 ### Removed
 
 - `-x` / `--disable-delete-confirmation` CLI flag; deletions always require confirmation.
