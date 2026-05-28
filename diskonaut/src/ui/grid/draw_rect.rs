@@ -182,9 +182,7 @@ pub fn draw_tile_text_on_grid(buf: &mut Buffer, tile: &Tile, selected: bool) {
     if let Some(background_style) = background_style {
         for x in tile.x + 1..tile.x + tile.width {
             for y in tile.y + 1..tile.y + tile.height {
-                buf[(x, y)]
-                    .set_symbol("█")
-                    .set_style(background_style);
+                buf[(x, y)].set_symbol("█").set_style(background_style);
                 // we set both the filling symbol and the style
                 // because some terminals do not show this symbol on the one side
                 // and our tests need it in order to pass on the other side

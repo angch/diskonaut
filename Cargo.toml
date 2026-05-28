@@ -8,15 +8,14 @@ license = "MIT"
 homepage = "https://github.com/Gigas002/diskonaut"
 description = "Terminal disk space visual navigator"
 repository = "https://github.com/Gigas002/diskonaut"
-version = "0.11.0"
+version = "0.12.0"
 
 [workspace.dependencies]
 clap = { version = "4", features = ["derive"] }
 crossterm = "0.29"
-insta = "0.16.0"
 jwalk = "0.8"
 libdiskonaut = { path = "libdiskonaut" }
 rustix = { version = "1", default-features = false, features = ["process"] }
 thiserror = "2"
 ratatui = { version = "0.30", default-features = false, features = ["crossterm_0_29"] }
-unicode-width = "0.1.7"
+unicode-width = "0.2"
