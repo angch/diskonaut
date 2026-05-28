@@ -1,0 +1,18 @@
+[graph]
+all-features = true
+
+[licenses]
+allow = [
+
+]
+confidence-threshold = 0.8
+private = { ignore = true }
+
+[advisories]
+db-urls = ["https://github.com/rustsec/advisory-db"]
+
+[bans]
+multiple-versions = "warn"
+
+[sources]
+allow-registry = ["https://github.com/rust-lang/crates.io-index"]
