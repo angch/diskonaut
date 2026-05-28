@@ -2,12 +2,12 @@
 mod tests;
 
 mod app;
+mod error;
 mod input;
 mod messages;
 mod state;
 mod ui;
 
-use ::failure;
 use ::std::env;
 use ::std::io;
 use ::std::path::PathBuf;
@@ -18,7 +18,8 @@ use ::std::sync::mpsc;
 use ::std::sync::mpsc::{Receiver, SyncSender};
 use ::std::thread::park_timeout;
 use ::std::{thread, time};
-use ::structopt::StructOpt;
+use clap::Parser;
+use error::Error;
 use libdiskonaut::{ScanItem, ScanOptions, scan_folder};
 
 use ::tui::backend::Backend;
@@ -44,17 +45,16 @@ const SHOULD_SCAN_HD_FILES_IN_MULTIPLE_THREADS: bool = true;
 #[cfg(test)]
 const SHOULD_SCAN_HD_FILES_IN_MULTIPLE_THREADS: bool = false;
 
-#[derive(StructOpt, Debug)]
-#[structopt(name = "diskonaut")]
+#[derive(Parser, Debug)]
+#[command(name = "diskonaut")]
 pub struct Opt {
-    #[structopt(name = "folder", parse(from_os_str))]
     /// The folder to scan
     folder: Option<PathBuf>,
-    #[structopt(short, long)]
     /// Show file sizes rather than their block usage on disk
+    #[arg(short, long)]
     apparent_size: bool,
-    #[structopt(short, long)]
     /// Don't ask for confirmation before deleting
+    #[arg(short = 'x', long)]
     disable_delete_confirmation: bool,
 }
 
@@ -68,8 +68,8 @@ fn get_stdout() -> io::Result<io::Stdout> {
     Ok(io::stdout())
 }
 
-fn try_main() -> Result<(), failure::Error> {
-    let opts = Opt::from_args();
+fn try_main() -> Result<(), Error> {
+    let opts = Opt::parse();
 
     match get_stdout() {
         Ok(stdout) => {
@@ -81,7 +81,7 @@ fn try_main() -> Result<(), failure::Error> {
                 None => env::current_dir()?,
             };
             if !folder.as_path().is_dir() {
-                failure::bail!("Folder '{}' does not exist", folder.to_string_lossy())
+                return Err(Error::FolderNotFound(folder.to_string_lossy().into_owned()));
             }
             start(
                 terminal_backend,
@@ -91,7 +91,7 @@ fn try_main() -> Result<(), failure::Error> {
                 opts.disable_delete_confirmation,
             );
         }
-        Err(_) => failure::bail!("Failed to get stdout: are you trying to pipe 'diskonaut'?"),
+        Err(_) => return Err(Error::NoStdout),
     }
     disable_raw_mode()?;
     Ok(())

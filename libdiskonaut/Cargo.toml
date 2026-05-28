@@ -10,8 +10,6 @@ description = "Disk usage model, treemap layout, and formatting for diskonaut."
 [dependencies]
 filesize = { workspace = true }
 jwalk = { workspace = true }
-nix = { workspace = true }
+rustix = { workspace = true }
+thiserror = { workspace = true }
 unicode-width = { workspace = true }
-
-[target.'cfg(windows)'.dependencies]
-winapi = { workspace = true }

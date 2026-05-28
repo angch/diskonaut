@@ -42,7 +42,7 @@ const SHOW_APPARENT_SIZE: bool = true;
 const DELETE_CONFIRMATION_ENABLED: bool = false;
 const DELETE_CONFIRMATION_DISABLED: bool = true;
 
-fn create_root_temp_dir(name: &str) -> Result<PathBuf, failure::Error> {
+fn create_root_temp_dir(name: &str) -> std::io::Result<PathBuf> {
     let mut dir = PathBuf::new();
     dir.push(String::from("/tmp/diskonaut_tests")); // TODO: fix this for other platforms
     dir.push(name);
@@ -52,7 +52,7 @@ fn create_root_temp_dir(name: &str) -> Result<PathBuf, failure::Error> {
     Ok(dir)
 }
 
-fn create_temp_file<P: AsRef<Path>>(path: P, size: usize) -> Result<(), failure::Error> {
+fn create_temp_file<P: AsRef<Path>>(path: P, size: usize) -> std::io::Result<()> {
     let mut file = File::create(path)?;
     let mut pos = 0;
     while pos < size {
@@ -2719,7 +2719,6 @@ fn empty_folder() {
     assert_snapshot!(&terminal_draw_events_mirror[0]);
     assert_snapshot!(&terminal_draw_events_mirror[1]);
 }
-#[cfg(not(target_os = "windows"))]
 #[test]
 #[allow(clippy::permissions_set_readonly_false)]
 fn permission_denied_when_deleting() {
@@ -2807,7 +2806,6 @@ fn permission_denied_when_deleting() {
     assert_snapshot!(&terminal_draw_events_mirror[7]);
     assert_snapshot!(&terminal_draw_events_mirror[8]);
 }
-#[cfg(not(target_os = "windows"))]
 #[test]
 #[allow(clippy::permissions_set_readonly_false)]
 fn permission_denied_when_deleting_no_confirmation() {

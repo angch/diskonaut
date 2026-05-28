@@ -11,14 +11,13 @@ repository = "https://github.com/Gigas002/diskonaut"
 version = "0.11.0"
 
 [workspace.dependencies]
+clap = { version = "4", features = ["derive"] }
 crossterm = "0.17"
-failure = "0.1"
 filesize = "0.2.0"
 insta = "0.16.0"
 jwalk = "0.5"
 libdiskonaut = { path = "libdiskonaut" }
-nix = "0.17.0"
-structopt = "0.3"
+rustix = { version = "1", default-features = false, features = ["process"] }
+thiserror = "2"
 tui = { version = "0.11", default-features = false, features = ["crossterm"] }
 unicode-width = "0.1.7"
-winapi = { version = "0.3", features = ["securitybaseapi", "debugapi"] }

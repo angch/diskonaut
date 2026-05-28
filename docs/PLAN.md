@@ -194,8 +194,8 @@ Phased: port highest-value scenarios first (navigation, delete, permission denie
 
 ### Phase 2 — Error + CLI + POSIX deps
 
-- [ ] `thiserror`, `clap`, `rustix`; remove `failure`, `structopt`, `nix`.
-- [ ] Remove Windows code.
+- [x] `thiserror`, `clap`, `rustix`; remove `failure`, `structopt`, `nix`.
+- [x] Remove Windows code.
 
 **Verify:** §3 gates; CLI `--help` unchanged in spirit.
 
