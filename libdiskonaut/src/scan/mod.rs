@@ -2,8 +2,9 @@
 
 use ::std::fs::Metadata;
 use ::std::path::{Path, PathBuf};
+use ::std::time::Duration;
 
-use ::jwalk::Parallelism::{RayonDefaultPool, Serial};
+use ::jwalk::Parallelism::{self, Serial};
 use ::jwalk::WalkDir;
 
 use crate::model::{FileTree, Folder};
@@ -42,7 +43,9 @@ pub enum ScanItem {
 /// Walk `root` and yield each filesystem entry (or a read error marker).
 pub fn scan_folder(root: impl AsRef<Path>, options: ScanOptions) -> impl Iterator<Item = ScanItem> {
     let parallelism = if options.parallel {
-        RayonDefaultPool
+        Parallelism::RayonDefaultPool {
+            busy_timeout: Duration::from_secs(1),
+        }
     } else {
         Serial
     };
