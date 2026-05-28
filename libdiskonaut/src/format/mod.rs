@@ -1,5 +1,8 @@
 mod display_size;
 mod truncate;
 
+#[cfg(test)]
+mod tests;
+
 pub use display_size::*;
 pub use truncate::*;

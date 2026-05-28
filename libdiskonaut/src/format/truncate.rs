@@ -45,16 +45,3 @@ pub fn truncate_end(row: &str, max_len: u16) -> String {
         row.to_string()
     }
 }
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-
-    #[test]
-    fn truncate_middle_char_boundary() {
-        assert_eq!(
-            truncate_middle("굿걸 - 누가 방송국을 털었나 E06.mp4", 44),
-            "굿걸 - 누가 방송국을[...]국을 털었나 E06.mp4",
-        );
-    }
-}
