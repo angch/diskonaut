@@ -1,0 +1,27 @@
+[package]
+name = "diskonaut"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+homepage.workspace = true
+description.workspace = true
+
+[[bin]]
+name = "diskonaut"
+path = "src/main.rs"
+
+[features]
+default = []
+
+[dependencies]
+crossterm = { workspace = true }
+failure = { workspace = true }
+jwalk = { workspace = true }
+libdiskonaut = { workspace = true }
+structopt = { workspace = true }
+tui = { workspace = true }
+unicode-width = { workspace = true }
+
+[dev-dependencies]
+insta = { workspace = true }

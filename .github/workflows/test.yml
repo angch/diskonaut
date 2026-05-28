@@ -32,54 +32,28 @@ jobs:
         run: cargo test --workspace --all-features --verbose
       - name: Run tests (--no-default-features)
         run: cargo test --workspace --no-default-features --verbose
-      - name: Generate coverage report (libtrayd)
+      - name: Generate coverage report (libdiskonaut)
         run: |
-          cargo llvm-cov --all-features -p libtrayd --lcov --output-path lcov-libtrayd.info
-      - name: Generate coverage report (trayd)
+          cargo llvm-cov --all-features -p libdiskonaut --lcov --output-path lcov-libdiskonaut.info
+      - name: Generate coverage report (diskonaut)
         run: |
-          cargo llvm-cov --all-features -p trayd --lcov --output-path lcov-trayd.info
-      - name: Generate coverage report (trayctl)
-        run: |
-          cargo llvm-cov --all-features -p trayctl --lcov --output-path lcov-trayctl.info
-      - name: Generate coverage report (tray-tui)
-        run: |
-          cargo llvm-cov --all-features -p tray-tui --lcov --output-path lcov-tray-tui.info
-      - name: Upload libtrayd coverage to Codecov
+          cargo llvm-cov --all-features -p diskonaut --lcov --output-path lcov-diskonaut.info
+      - name: Upload libdiskonaut coverage to Codecov
         uses: codecov/codecov-action@v6
         with:
-          files: ./lcov-libtrayd.info
-          flags: libtrayd
-          name: libtrayd
+          files: ./lcov-libdiskonaut.info
+          flags: libdiskonaut
+          name: libdiskonaut
           fail_ci_if_error: false
           verbose: true
         env:
           CODECOV_TOKEN: ${{ secrets.CODECOV_TOKEN }}
-      - name: Upload trayd coverage to Codecov
+      - name: Upload diskonaut coverage to Codecov
         uses: codecov/codecov-action@v6
         with:
-          files: ./lcov-trayd.info
-          flags: trayd
-          name: trayd
-          fail_ci_if_error: false
-          verbose: true
-        env:
-          CODECOV_TOKEN: ${{ secrets.CODECOV_TOKEN }}
-      - name: Upload trayctl coverage to Codecov
-        uses: codecov/codecov-action@v6
-        with:
-          files: ./lcov-trayctl.info
-          flags: trayctl
-          name: trayctl
-          fail_ci_if_error: false
-          verbose: true
-        env:
-          CODECOV_TOKEN: ${{ secrets.CODECOV_TOKEN }}
-      - name: Upload tray-tui coverage to Codecov
-        uses: codecov/codecov-action@v6
-        with:
-          files: ./lcov-tray-tui.info
-          flags: tray-tui
-          name: tray-tui
+          files: ./lcov-diskonaut.info
+          flags: diskonaut
+          name: diskonaut
           fail_ci_if_error: false
           verbose: true
         env:

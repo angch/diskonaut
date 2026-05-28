@@ -176,11 +176,11 @@ Phased: port highest-value scenarios first (navigation, delete, permission denie
 
 ### Phase 0 — Workspace scaffold + CI fix
 
-- [ ] Root workspace `Cargo.toml` (`resolver = "3"`, edition `2024`).
-- [ ] Create `libdiskonaut/` and `diskonaut/` crates; move `src/` → split per §2.
-- [ ] Fix `.github/workflows/*` crate names (`libdiskonaut`, `diskonaut` — not trayd).
-- [ ] `deny.toml` licenses/advisories populated (MIT).
-- [ ] `cargo fmt`, `clippy`, `test` green on moved code **without** dependency migrations yet (minimal diff).
+- [x] Root workspace `Cargo.toml` (`resolver = "3"`, edition `2024`).
+- [x] Create `libdiskonaut/` and `diskonaut/` crates; move `src/` → split per §2.
+- [x] Fix `.github/workflows/*` crate names (`libdiskonaut`, `diskonaut` — not trayd).
+- [x] `deny.toml` licenses/advisories populated (MIT).
+- [x] `cargo fmt`, `clippy`, `test` green on moved code **without** dependency migrations yet (minimal diff).
 
 **Verify:** §3 gates on scaffold.
 
