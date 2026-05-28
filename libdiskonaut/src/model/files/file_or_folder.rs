@@ -3,7 +3,7 @@ use ::std::ffi::OsString;
 use ::std::fs::Metadata;
 use ::std::path::{Path, PathBuf};
 
-use ::filesize::PathExt;
+use crate::os::size_on_disk_fast;
 
 #[derive(Debug, Clone)]
 pub enum FileOrFolder {
@@ -73,9 +73,7 @@ impl Folder {
             let size = if show_apparent_size {
                 entry_metadata.len() as u128
             } else {
-                relative_path
-                    .size_on_disk_fast(entry_metadata)
-                    .unwrap_or(entry_metadata.len()) as u128
+                size_on_disk_fast(entry_metadata) as u128
             };
             self.add_file(relative_path, size);
         }
