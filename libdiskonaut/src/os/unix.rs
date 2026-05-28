@@ -1,5 +1,5 @@
-use nix::unistd::geteuid;
+use rustix::process::{Uid, geteuid};
 
 pub fn is_user_admin() -> bool {
-    geteuid().is_root()
+    geteuid() == Uid::ROOT
 }

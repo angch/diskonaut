@@ -1,8 +1,6 @@
-#[cfg(target_os = "windows")]
-pub mod windows;
+mod unix;
 
-#[cfg(not(target_os = "windows"))]
-pub mod unix;
+pub use unix::is_user_admin;
 
 #[cfg(test)]
 mod tests;

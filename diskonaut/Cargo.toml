@@ -15,10 +15,10 @@ path = "src/main.rs"
 default = []
 
 [dependencies]
+clap = { workspace = true }
 crossterm = { workspace = true }
-failure = { workspace = true }
 libdiskonaut = { workspace = true }
-structopt = { workspace = true }
+thiserror = { workspace = true }
 tui = { workspace = true }
 unicode-width = { workspace = true }
 
