@@ -143,7 +143,9 @@ fn parse_keybind(
     default: KeyBinding,
 ) -> Result<KeyBinding, ConfigError> {
     match value {
-        Some(s) => KeyBinding::parse(s).map_err(|reason| ConfigError::InvalidKeybind { name, reason }),
+        Some(s) => {
+            KeyBinding::parse(s).map_err(|reason| ConfigError::InvalidKeybind { name, reason })
+        }
         None => Ok(default),
     }
 }

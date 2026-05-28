@@ -24,7 +24,10 @@ move-left = "left"
     assert!(!cfg.base.apparent_size);
     let kb = cfg.keybinds().unwrap();
     assert_eq!(kb.delete, KeyBinding::char('x'));
-    assert_eq!(kb.move_left, KeyBinding::key(crossterm::event::KeyCode::Left));
+    assert_eq!(
+        kb.move_left,
+        KeyBinding::key(crossterm::event::KeyCode::Left)
+    );
     assert_eq!(kb.move_right, KeyBinding::char('l'));
 }
 

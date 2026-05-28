@@ -54,10 +54,12 @@ fn try_main() -> Result<(), Error> {
             path: config_path.clone(),
             source,
         })?;
-    let keybinds = diskonaut_config.keybinds().map_err(|source| Error::Config {
-        path: config_path,
-        source,
-    })?;
+    let keybinds = diskonaut_config
+        .keybinds()
+        .map_err(|source| Error::Config {
+            path: config_path,
+            source,
+        })?;
     let show_apparent_size = opts.apparent_size || diskonaut_config.base.apparent_size;
 
     match get_stdout() {
@@ -126,8 +128,8 @@ fn start<B>(
                             continue;
                         }
 
-                        let delay = matches!(&evt, BackEvent::Key(_))
-                            && needs_quit_delay(&evt, &keybinds);
+                        let delay =
+                            matches!(&evt, BackEvent::Key(_)) && needs_quit_delay(&evt, &keybinds);
                         if instruction_sender.send(Instruction::Keypress(evt)).is_err() {
                             break;
                         }

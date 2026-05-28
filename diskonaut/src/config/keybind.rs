@@ -81,7 +81,10 @@ impl KeyBinding {
             return Err("key cannot be empty".into());
         }
 
-        if let Some(rest) = s.strip_prefix("ctrl+").or_else(|| s.strip_prefix("control+")) {
+        if let Some(rest) = s
+            .strip_prefix("ctrl+")
+            .or_else(|| s.strip_prefix("control+"))
+        {
             let c = single_char(rest)?;
             return Ok(Self::ctrl_char(c));
         }
