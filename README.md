@@ -20,12 +20,6 @@ Windows is not supported in **0.12.0**.
 
 ## Install
 
-**From crates.io** (when published):
-
-```bash
-cargo install diskonaut
-```
-
 **From this repository:**
 
 ```bash
