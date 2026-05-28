@@ -15,8 +15,8 @@ use ::std::sync::mpsc;
 use ::std::sync::mpsc::{Receiver, SyncSender};
 use ::std::thread::park_timeout;
 use ::std::{thread, time};
-use cli::Opt;
 use clap::Parser;
+use cli::Opt;
 use error::Error;
 use libdiskonaut::{ScanItem, ScanOptions, scan_folder};
 
@@ -192,8 +192,7 @@ fn start<B>(
                 let running = running.clone();
                 move || {
                     while running.load(Ordering::Acquire) && !loaded.load(Ordering::Acquire) {
-                        let _ =
-                            instruction_sender.send(Instruction::ToggleScanningVisualIndicator);
+                        let _ = instruction_sender.send(Instruction::ToggleScanningVisualIndicator);
                         let _ = instruction_sender.send(Instruction::RenderAndUpdateBoard);
                         park_timeout(time::Duration::from_millis(100));
                     }

@@ -195,10 +195,8 @@ impl TitleTelescope {
         buf[(rect.x + 1 + index_in_text, rect.y)]
             .set_style(Style::default().add_modifier(Modifier::BOLD));
         if index_in_text >= text_length - 2 {
-            buf[(rect.x + 1, rect.y)]
-                .set_style(Style::default().add_modifier(Modifier::BOLD));
-            buf[(rect.x + 2, rect.y)]
-                .set_style(Style::default().add_modifier(Modifier::BOLD));
+            buf[(rect.x + 1, rect.y)].set_style(Style::default().add_modifier(Modifier::BOLD));
+            buf[(rect.x + 2, rect.y)].set_style(Style::default().add_modifier(Modifier::BOLD));
         } else {
             buf[(rect.x + 1 + index_in_text + 1, rect.y)]
                 .set_style(Style::default().add_modifier(Modifier::BOLD));

@@ -98,13 +98,7 @@ fn prompt_file_deletion_without_confirmation_deletes_immediately() {
     File::create(&target).expect("create file");
 
     let (tx, _rx) = mpsc::sync_channel(1);
-    let mut app = App::new(
-        TestBackend::new(80, 24),
-        dir.clone(),
-        tx,
-        true,
-        true,
-    );
+    let mut app = App::new(TestBackend::new(80, 24), dir.clone(), tx, true, true);
     let meta = fs::metadata(&target).expect("metadata");
     app.add_entry_to_base_folder(&meta, target.clone());
     app.start_ui();
@@ -117,7 +111,10 @@ fn prompt_file_deletion_without_confirmation_deletes_immediately() {
     app.board.set_selected_index(&file_index);
     app.prompt_file_deletion();
 
-    assert!(!target.exists(), "file should be deleted without confirmation prompt");
+    assert!(
+        !target.exists(),
+        "file should be deleted without confirmation prompt"
+    );
     let _ = fs::remove_dir_all(&dir);
 }
 
