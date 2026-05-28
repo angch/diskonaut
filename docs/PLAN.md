@@ -17,7 +17,7 @@ Execution discipline mirrors [`docs/TRAYD_PLAN.md`](TRAYD_PLAN.md) and the `tray
 | # | Goal | Target |
 |---|------|--------|
 | 1 | Workspace layout | Root `Cargo.toml` workspace: **`libdiskonaut`** + **`diskonaut`** binary crate |
-| 2 | Testing | Logic in `libdiskonaut/`; integration/UI tests in `diskonaut/`; `mod tests;` siblings only |
+| 2 | Testing | `libdiskonaut/` + `diskonaut/` unit tests via `tests.rs` siblings; no integration/snapshot tests |
 | 3 | CI/CD | GitHub Actions: fmt, typos, deny, clippy (feature matrix), test matrix, doc |
 | 4 | Quality gates | All jobs green on every merged phase |
 | 5 | Edition | Rust **2024** (workspace) |
@@ -29,7 +29,7 @@ Execution discipline mirrors [`docs/TRAYD_PLAN.md`](TRAYD_PLAN.md) and the `tray
 | 11 | Block usage | **Drop `filesize`**; inline `st_blocks` via `rustix`/`libc` on Unix |
 | 12 | Platforms | **Remove Windows** (`winapi`, `os/windows.rs`, cfg branches) |
 | 13 | Deps | Bump all workspace dependencies; `cargo deny` + advisories |
-| 14 | Snapshots | **Remove `insta`**; replace with structured assertions (see §6) |
+| 14 | Snapshots | **Removed** — integration/UI tests dropped; `libdiskonaut` unit tests only |
 
 ---
 
@@ -57,7 +57,7 @@ diskonaut/                       # workspace root (this repo)
       input/
       messages/
       ui/                        # ratatui widgets, modals, grid
-      tests/                     # integration + UI tests (no insta)
+      cli/ input/ app/ ui/ …   # each with tests.rs sibling
   docs/
     PLAN.md
   .github/workflows/
@@ -156,19 +156,11 @@ Delete:
 
 ---
 
-## 6. Testing without `insta`
+## 6. Testing
 
-**Today:** ~100 `assert_snapshot!` calls on serialized terminal draw strings (`src/tests/cases/ui.rs` + `src/tests/cases/snapshots/*.snap`).
+**libdiskonaut:** unit tests for treemap layout, folder aggregation, delete_path, format helpers — pure data, no terminal (`mod tests;` siblings per module).
 
-**Target:**
-
-1. **libdiskonaut:** unit tests for treemap layout, folder aggregation, delete_path, format helpers — pure data, no terminal.
-2. **diskonaut:** keep `TestBackend` recording draws, but assert with:
-   - **Event sequence** equality (already done for some tests), and/or
-   - **Parsed buffer assertions** (selected tile, status line text, modal open) via small test helpers, not full-frame golden strings.
-3. Delete `insta` dev-dependency and all `*.snap` files once each scenario has explicit assertions.
-
-Phased: port highest-value scenarios first (navigation, delete, permission denied); do not block Phase 0–3 on full snapshot parity.
+**diskonaut:** same `tests.rs` sibling pattern per module (`cli`, `error`, `input`, `app`, `messages`, `state`, `ui/grid`, `ui/title`, …). No integration/UI snapshot tests; TUI smoke-tested manually.
 
 ---
 
@@ -211,14 +203,14 @@ Phased: port highest-value scenarios first (navigation, delete, permission denie
 - [x] All UI under `diskonaut/src/ui/` on ratatui.
 - [x] Update `TestBackend` for ratatui.
 
-**Verify:** manual TUI smoke test; compile all integration tests.
+**Verify:** manual TUI smoke test.
 
-### Phase 5 — Purge `insta`
+### Phase 5 — Remove integration tests
 
-- [ ] Replace snapshots with structured assertions (§6).
-- [ ] Remove `snapshots/` directory.
+- [x] Delete `diskonaut/src/tests/` (UI tests, fakes, insta snapshots).
+- [x] Remove `insta` dev-dependency.
 
-**Verify:** `cargo test` without insta.
+**Verify:** `cargo test --workspace` (libdiskonaut unit tests only).
 
 ### Phase 6 — Dependency refresh + docs
 
@@ -231,7 +223,7 @@ Phased: port highest-value scenarios first (navigation, delete, permission denie
 ## 8. Definition of done (v0.12 or next minor)
 
 - [ ] Workspace `libdiskonaut` + `diskonaut` with tests colocated per module.
-- [ ] Edition 2024; ratatui; clap; rustix; no failure/nix/structopt/filesize/insta/windows.
+- [ ] Edition 2024; ratatui; clap; rustix; no failure/nix/structopt/filesize/insta/windows (integration tests removed).
 - [ ] CI green on all §3 gates.
 - [ ] Linux/macOS supported; Windows explicitly out of scope.
 

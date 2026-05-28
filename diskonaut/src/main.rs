@@ -1,14 +1,11 @@
-#[cfg(test)]
-mod tests;
-
 mod app;
+mod cli;
 mod error;
 mod input;
 mod messages;
 mod state;
 mod ui;
 
-use ::std::env;
 use ::std::io;
 use ::std::path::PathBuf;
 use ::std::process;
@@ -18,6 +15,7 @@ use ::std::sync::mpsc;
 use ::std::sync::mpsc::{Receiver, SyncSender};
 use ::std::thread::park_timeout;
 use ::std::{thread, time};
+use cli::Opt;
 use clap::Parser;
 use error::Error;
 use libdiskonaut::{ScanItem, ScanOptions, scan_folder};
@@ -31,32 +29,6 @@ use ratatui::backend::CrosstermBackend;
 use app::{App, UiMode};
 use input::TerminalEvents;
 use messages::{Event, Instruction, handle_events};
-
-#[cfg(not(test))]
-const SHOULD_SHOW_LOADING_ANIMATION: bool = true;
-#[cfg(test)]
-const SHOULD_SHOW_LOADING_ANIMATION: bool = false;
-#[cfg(not(test))]
-const SHOULD_HANDLE_WIN_CHANGE: bool = true;
-#[cfg(test)]
-const SHOULD_HANDLE_WIN_CHANGE: bool = false;
-#[cfg(not(test))]
-const SHOULD_SCAN_HD_FILES_IN_MULTIPLE_THREADS: bool = true;
-#[cfg(test)]
-const SHOULD_SCAN_HD_FILES_IN_MULTIPLE_THREADS: bool = false;
-
-#[derive(Parser, Debug)]
-#[command(name = "diskonaut")]
-pub struct Opt {
-    /// The folder to scan
-    folder: Option<PathBuf>,
-    /// Show file sizes rather than their block usage on disk
-    #[arg(short, long)]
-    apparent_size: bool,
-    /// Don't ask for confirmation before deleting
-    #[arg(short = 'x', long)]
-    disable_delete_confirmation: bool,
-}
 
 fn main() {
     if let Err(err) = try_main() {
@@ -76,13 +48,7 @@ fn try_main() -> Result<(), Error> {
             enable_raw_mode()?;
             let terminal_backend = CrosstermBackend::new(stdout);
             let terminal_events = TerminalEvents {};
-            let folder = match opts.folder {
-                Some(folder) => folder,
-                None => env::current_dir()?,
-            };
-            if !folder.as_path().is_dir() {
-                return Err(Error::FolderNotFound(folder.to_string_lossy().into_owned()));
-            }
+            let folder = opts.resolve_folder()?;
             start(
                 terminal_backend,
                 Box::new(terminal_events),
@@ -97,7 +63,7 @@ fn try_main() -> Result<(), Error> {
     Ok(())
 }
 
-pub fn start<B>(
+fn start<B>(
     terminal_backend: B,
     terminal_events: Box<dyn Iterator<Item = BackEvent> + Send>,
     path: PathBuf,
@@ -137,10 +103,8 @@ pub fn start<B>(
                 move || {
                     for evt in terminal_events {
                         if let BackEvent::Resize(_x, _y) = evt {
-                            if SHOULD_HANDLE_WIN_CHANGE {
-                                let _ = instruction_sender.send(Instruction::ResetUiMode);
-                                let _ = instruction_sender.send(Instruction::Render);
-                            }
+                            let _ = instruction_sender.send(Instruction::ResetUiMode);
+                            let _ = instruction_sender.send(Instruction::Render);
                             continue;
                         }
 
@@ -189,7 +153,7 @@ pub fn start<B>(
                 let loaded = loaded.clone();
                 move || {
                     let scan_options = ScanOptions {
-                        parallel: SHOULD_SCAN_HD_FILES_IN_MULTIPLE_THREADS,
+                        parallel: true,
                         show_apparent_size,
                         skip_hidden: false,
                         follow_links: false,
@@ -220,25 +184,23 @@ pub fn start<B>(
             .unwrap(),
     );
 
-    if SHOULD_SHOW_LOADING_ANIMATION {
-        active_threads.push(
-            thread::Builder::new()
-                .name("loading_loop".to_string())
-                .spawn({
-                    let instruction_sender = instruction_sender.clone();
-                    let running = running.clone();
-                    move || {
-                        while running.load(Ordering::Acquire) && !loaded.load(Ordering::Acquire) {
-                            let _ =
-                                instruction_sender.send(Instruction::ToggleScanningVisualIndicator);
-                            let _ = instruction_sender.send(Instruction::RenderAndUpdateBoard);
-                            park_timeout(time::Duration::from_millis(100));
-                        }
+    active_threads.push(
+        thread::Builder::new()
+            .name("loading_loop".to_string())
+            .spawn({
+                let instruction_sender = instruction_sender.clone();
+                let running = running.clone();
+                move || {
+                    while running.load(Ordering::Acquire) && !loaded.load(Ordering::Acquire) {
+                        let _ =
+                            instruction_sender.send(Instruction::ToggleScanningVisualIndicator);
+                        let _ = instruction_sender.send(Instruction::RenderAndUpdateBoard);
+                        park_timeout(time::Duration::from_millis(100));
                     }
-                })
-                .unwrap(),
-        );
-    }
+                }
+            })
+            .unwrap(),
+    );
 
     let mut app = App::new(
         terminal_backend,

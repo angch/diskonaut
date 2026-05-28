@@ -21,6 +21,3 @@ libdiskonaut = { workspace = true }
 thiserror = { workspace = true }
 ratatui = { workspace = true }
 unicode-width = { workspace = true }
-
-[dev-dependencies]
-insta = { workspace = true }
