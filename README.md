@@ -60,7 +60,7 @@ Run `diskonaut --help` for the full option list.
 | `0` | Reset zoom |
 | `q` or `Ctrl+C` | Quit (confirm with `y` when prompted) |
 
-Deletion asks for `y` / `n` unless you pass `-x` / `--disable-delete-confirmation`.
+Deletion always asks for `y` / `n` confirmation.
 
 ## Command-line options
 
@@ -71,9 +71,8 @@ Arguments:
   FOLDER    Directory to scan (default: current working directory)
 
 Options:
-  -a, --apparent-size                 Show file size instead of on-disk usage
-  -x, --disable-delete-confirmation   Skip the delete confirmation dialog
-  -h, --help                          Print help
+  -a, --apparent-size   Show file size instead of on-disk usage
+  -h, --help            Print help
 ```
 
 ## Repository layout

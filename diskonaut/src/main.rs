@@ -54,7 +54,6 @@ fn try_main() -> Result<(), Error> {
                 Box::new(terminal_events),
                 folder,
                 opts.apparent_size,
-                opts.disable_delete_confirmation,
             );
         }
         Err(_) => return Err(Error::NoStdout),
@@ -68,7 +67,6 @@ fn start<B>(
     terminal_events: Box<dyn Iterator<Item = BackEvent> + Send>,
     path: PathBuf,
     show_apparent_size: bool,
-    disable_delete_confirmation: bool,
 ) where
     B: Backend + Send + 'static,
 {
@@ -201,13 +199,7 @@ fn start<B>(
             .unwrap(),
     );
 
-    let mut app = App::new(
-        terminal_backend,
-        path,
-        event_sender,
-        show_apparent_size,
-        disable_delete_confirmation,
-    );
+    let mut app = App::new(terminal_backend, path, event_sender, show_apparent_size);
     app.start(instruction_receiver);
     running.store(false, Ordering::Release);
 

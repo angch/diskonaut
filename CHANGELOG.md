@@ -7,6 +7,16 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Removed
+
+- `-x` / `--disable-delete-confirmation` CLI flag; deletions always require confirmation.
+
+## [0.12.1] - 2026-05-28
+
+### Changed
+
+- Fixed `Deploy` job
+
 ## [0.12.0] - 2026-05-28
 
 ### Added
