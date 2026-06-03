@@ -61,6 +61,7 @@ fn try_main() -> Result<(), Error> {
             source,
         })?;
     let show_apparent_size = opts.apparent_size || diskonaut_config.base.apparent_size;
+    let one_file_system = opts.one_file_system;
 
     match get_stdout() {
         Ok(stdout) => {
@@ -73,6 +74,7 @@ fn try_main() -> Result<(), Error> {
                 Box::new(terminal_events),
                 folder,
                 show_apparent_size,
+                one_file_system,
                 keybinds,
             );
         }
@@ -87,6 +89,7 @@ fn start<B>(
     terminal_events: Box<dyn Iterator<Item = BackEvent> + Send>,
     path: PathBuf,
     show_apparent_size: bool,
+    one_file_system: bool,
     keybinds: config::Keybinds,
 ) where
     B: Backend + Send + 'static,
@@ -164,6 +167,7 @@ fn start<B>(
                         show_apparent_size,
                         skip_hidden: false,
                         follow_links: false,
+                        one_file_system,
                     };
                     'scanning: for item in scan_folder(&path, scan_options) {
                         let instruction_sent = match item {

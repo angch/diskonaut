@@ -20,6 +20,8 @@ pub struct ScanOptions {
     pub skip_hidden: bool,
     /// Follow symbolic links.
     pub follow_links: bool,
+    /// Do not cross filesystem boundaries (like `du -x`).
+    pub one_file_system: bool,
 }
 
 impl Default for ScanOptions {
@@ -29,6 +31,7 @@ impl Default for ScanOptions {
             show_apparent_size: false,
             skip_hidden: false,
             follow_links: false,
+            one_file_system: false,
         }
     }
 }
@@ -50,20 +53,54 @@ pub fn scan_folder(root: impl AsRef<Path>, options: ScanOptions) -> impl Iterato
         Serial
     };
 
-    WalkDir::new(root.as_ref())
+    #[cfg(unix)]
+    let root_dev: Option<u64> = if options.one_file_system {
+        use ::std::os::unix::fs::MetadataExt;
+        ::std::fs::metadata(root.as_ref()).ok().map(|m| m.dev())
+    } else {
+        None
+    };
+
+    #[cfg(unix)]
+    let walker = {
+        WalkDir::new(root.as_ref())
+            .parallelism(parallelism)
+            .skip_hidden(options.skip_hidden)
+            .follow_links(options.follow_links)
+            .process_read_dir(move |_depth, _path, _state, children| {
+                if let Some(dev) = root_dev {
+                    use ::std::os::unix::fs::MetadataExt;
+                    for child in children.iter_mut() {
+                        if let Ok(entry) = child {
+                            if entry.file_type.is_dir() {
+                                if let Ok(meta) = entry.metadata() {
+                                    if meta.dev() != dev {
+                                        entry.read_children_path = None;
+                                    }
+                                }
+                            }
+                        }
+                    }
+                }
+            })
+    };
+    #[cfg(not(unix))]
+    let walker = WalkDir::new(root.as_ref())
         .parallelism(parallelism)
         .skip_hidden(options.skip_hidden)
-        .follow_links(options.follow_links)
+        .follow_links(options.follow_links);
+
+    walker
         .into_iter()
-        .map(|entry| match entry {
+        .filter_map(move |entry| match entry {
             Ok(entry) => match entry.metadata() {
-                Ok(metadata) => ScanItem::Entry {
+                Ok(metadata) => Some(ScanItem::Entry {
                     metadata,
                     path: entry.path().to_path_buf(),
-                },
-                Err(_) => ScanItem::ReadError,
+                }),
+                Err(_) => Some(ScanItem::ReadError),
             },
-            Err(_) => ScanItem::ReadError,
+            Err(_) => Some(ScanItem::ReadError),
         })
 }
 
