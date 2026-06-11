@@ -39,7 +39,7 @@ jobs:
         run: |
           cargo llvm-cov --all-features -p diskonaut --lcov --output-path lcov-diskonaut.info
       - name: Upload libdiskonaut coverage to Codecov
-        uses: codecov/codecov-action@v6
+        uses: codecov/codecov-action@v7
         with:
           files: ./lcov-libdiskonaut.info
           flags: libdiskonaut
@@ -49,7 +49,7 @@ jobs:
         env:
           CODECOV_TOKEN: ${{ secrets.CODECOV_TOKEN }}
       - name: Upload diskonaut coverage to Codecov
-        uses: codecov/codecov-action@v6
+        uses: codecov/codecov-action@v7
         with:
           files: ./lcov-diskonaut.info
           flags: diskonaut
