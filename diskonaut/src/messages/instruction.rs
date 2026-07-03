@@ -3,7 +3,7 @@ use ::std::path::PathBuf;
 use ::std::sync::mpsc::Receiver;
 
 use ::ratatui::backend::Backend;
-use crossterm::event::Event as BackEvent;
+use ratatui::crossterm::event::Event as BackEvent;
 
 use crate::input::{
     handle_keypress_delete_file_mode, handle_keypress_error_message, handle_keypress_exiting_mode,

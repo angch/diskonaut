@@ -22,9 +22,9 @@ use error::Error;
 use libdiskonaut::{ScanItem, ScanOptions, scan_folder};
 
 use ::ratatui::backend::Backend;
-use crossterm::event::Event as BackEvent;
-use crossterm::terminal::{disable_raw_mode, enable_raw_mode};
 use ratatui::backend::CrosstermBackend;
+use ratatui::crossterm::event::Event as BackEvent;
+use ratatui::crossterm::terminal::{disable_raw_mode, enable_raw_mode};
 
 use app::{App, UiMode};
 use config::DiskonautConfig;

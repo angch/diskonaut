@@ -1,8 +1,8 @@
 use ::std::path::PathBuf;
 use ::std::sync::mpsc;
 
-use crossterm::event::{Event, KeyCode, KeyEvent, KeyModifiers};
 use ratatui::backend::TestBackend;
+use ratatui::crossterm::event::{Event, KeyCode, KeyEvent, KeyModifiers};
 
 use super::controls::{
     handle_keypress_delete_file_mode, handle_keypress_exiting_mode, handle_keypress_loading_mode,

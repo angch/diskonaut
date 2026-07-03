@@ -12,12 +12,11 @@ version = "0.12.2"
 
 [workspace.dependencies]
 clap = { version = "4", features = ["derive"] }
-crossterm = "0.29"
 jwalk = "0.8"
 libdiskonaut = { path = "libdiskonaut" }
 rustix = { version = "1", default-features = false, features = ["process"] }
 serde = { version = "1", features = ["derive"] }
 thiserror = "2"
 toml = "1"
-ratatui = { version = "0.30", default-features = false, features = ["crossterm_0_29"] }
+ratatui = { version = "0.30", default-features = false, features = ["crossterm"] }
 unicode-width = "0.2"

@@ -1,6 +1,6 @@
 use ::ratatui::backend::Backend;
-use crossterm::event::Event;
-use crossterm::event::read;
+use ratatui::crossterm::event::Event;
+use ratatui::crossterm::event::read;
 
 use crate::App;
 use crate::config::Keybinds;

@@ -1,4 +1,4 @@
-use crossterm::event::{Event, KeyCode, KeyEvent, KeyModifiers};
+use ratatui::crossterm::event::{Event, KeyCode, KeyEvent, KeyModifiers};
 
 /// A single key chord used for an action.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]

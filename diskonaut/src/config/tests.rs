@@ -26,7 +26,7 @@ move-left = "left"
     assert_eq!(kb.delete, KeyBinding::char('x'));
     assert_eq!(
         kb.move_left,
-        KeyBinding::key(crossterm::event::KeyCode::Left)
+        KeyBinding::key(ratatui::crossterm::event::KeyCode::Left)
     );
     assert_eq!(kb.move_right, KeyBinding::char('l'));
 }

@@ -16,7 +16,6 @@ default = []
 
 [dependencies]
 clap = { workspace = true }
-crossterm = { workspace = true }
 libdiskonaut = { workspace = true }
 serde = { workspace = true }
 thiserror = { workspace = true }
