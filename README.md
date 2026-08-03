@@ -12,38 +12,9 @@
 
 ## Requirements
 
-- A Unix-like system (Linux, macOS, or BSD)
+- Linux/MacOS
 - A terminal with reasonable size (roughly 50×15 cells minimum for the main UI)
-- [Rust](https://www.rust-lang.org/tools/install) 1.85+ if building from source
-
-Windows is not supported in **0.12.0**.
-
-## Install
-
-**From this repository:**
-
-```bash
-git clone https://github.com/Gigas002/diskonaut.git
-cd diskonaut
-cargo install --path diskonaut
-```
-
-The installable binary comes from the `diskonaut` crate; scanning and layout logic live in the sibling `libdiskonaut` library.
-
-## Quick start
-
-```bash
-# Scan the current directory
-diskonaut
-
-# Scan a specific path
-diskonaut ~/Downloads
-
-# Show logical sizes (useful on compressed or sparse filesystems)
-diskonaut -a /var/log
-```
-
-Run `diskonaut --help` for the full option list.
+- [Rust](https://www.rust-lang.org/tools/install)
 
 ## Configuration
 
@@ -52,69 +23,16 @@ Optional TOML config (see [example/config.toml](example/config.toml)):
 - Default path: `~/.config/diskonaut/config.toml`
 - Override path: `diskonaut -c /path/to/config.toml`
 
-```toml
-version = 1
-
-[base]
-apparent-size = false   # same as -a when not passed on the CLI
-
-[keybinds]
-delete = "d"            # override any action key (enter, escape, ctrl+c, …)
-```
-
-CLI `-a` / `--apparent-size` ORs with `[base] apparent-size`. Unlisted keybinds keep built-in defaults. Arrow keys and Ctrl+f/b/n/p still work for movement alongside configured vim-style keys.
-
 ## Keyboard shortcuts
 
-| Key | Action |
-|-----|--------|
-| `←` `→` `↑` `↓` or `h` `j` `k` `l` | Move selection |
-| `Enter` | Open folder |
-| `Esc` | Go to parent folder |
-| `d` | Delete selected file or folder |
-| `+` / `-` | Zoom in / out |
-| `0` | Reset zoom |
-| `q` or `Ctrl+C` | Quit (confirm with `y` when prompted) |
+| Key                                | Action                                |
+| ---------------------------------- | ------------------------------------- |
+| `←` `→` `↑` `↓` or `h` `j` `k` `l` | Move selection                        |
+| `Enter`                            | Open folder                           |
+| `Esc`                              | Go to parent folder                   |
+| `d`                                | Delete selected file or folder        |
+| `+` / `-`                          | Zoom in / out                         |
+| `0`                                | Reset zoom                            |
+| `q` or `Ctrl+C`                    | Quit (confirm with `y` when prompted) |
 
 Deletion always asks for `y` / `n` confirmation.
-
-## Command-line options
-
-```
-diskonaut [OPTIONS] [FOLDER]
-
-Arguments:
-  FOLDER    Directory to scan (default: current working directory)
-
-Options:
-  -a, --apparent-size   Show file size instead of on-disk usage
-  -c, --config FILE     Path to config file
-  -h, --help            Print help
-```
-
-## Repository layout
-
-```
-diskonaut/          # workspace root
-├── libdiskonaut/   # scan, file tree, treemap math, formatting
-└── diskonaut/      # CLI + TUI
-```
-
-## Developing
-
-```bash
-cargo build --workspace
-cargo test --workspace
-cargo clippy --workspace --all-targets -- -D warnings
-cargo fmt --all
-```
-
-CI also runs `typos`, `cargo deny check`, and `cargo doc`.
-
-## Changelog
-
-See [CHANGELOG.md](CHANGELOG.md). **0.12.0** is a major refresh: workspace split, Rust 2024, `ratatui` / `clap` / `rustix`, and removal of Windows support.
-
-## License
-
-MIT — see [LICENSE](LICENSE).
