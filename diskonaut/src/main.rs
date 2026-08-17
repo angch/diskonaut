@@ -162,8 +162,6 @@ fn start<B>(
                     let scan_options = ScanOptions {
                         parallel: true,
                         show_apparent_size,
-                        skip_hidden: false,
-                        follow_links: false,
                     };
                     'scanning: for item in scan_folder(&path, scan_options) {
                         let instruction_sent = match item {

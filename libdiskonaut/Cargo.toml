@@ -9,7 +9,7 @@ description = "Disk usage model, treemap layout, and formatting for diskonaut."
 readme = "../README.md"
 
 [dependencies]
-jwalk = { workspace = true }
+dua-core = { workspace = true }
 rustix = { workspace = true }
 thiserror = { workspace = true }
 unicode-width = { workspace = true }

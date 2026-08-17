@@ -1,25 +1,20 @@
-//! Parallel directory traversal (`jwalk`).
+//! Parallel directory traversal (`dua-core`).
 
 use ::std::fs::Metadata;
+use ::std::num::NonZero;
 use ::std::path::{Path, PathBuf};
-use ::std::time::Duration;
 
-use ::jwalk::Parallelism::{self, Serial};
-use ::jwalk::WalkDir;
+use ::dua_core::{Order, walk};
 
 use crate::model::{FileTree, Folder};
 
 /// Options controlling filesystem traversal.
 #[derive(Clone, Copy, Debug)]
 pub struct ScanOptions {
-    /// Use a rayon thread pool for the walk.
+    /// Use multiple threads for the walk.
     pub parallel: bool,
     /// Passed through to [`FileTree`] when using [`scan_into_tree`].
     pub show_apparent_size: bool,
-    /// Skip hidden files and directories.
-    pub skip_hidden: bool,
-    /// Follow symbolic links.
-    pub follow_links: bool,
 }
 
 impl Default for ScanOptions {
@@ -27,8 +22,6 @@ impl Default for ScanOptions {
         Self {
             parallel: true,
             show_apparent_size: false,
-            skip_hidden: false,
-            follow_links: false,
         }
     }
 }
@@ -42,29 +35,22 @@ pub enum ScanItem {
 
 /// Walk `root` and yield each filesystem entry (or a read error marker).
 pub fn scan_folder(root: impl AsRef<Path>, options: ScanOptions) -> impl Iterator<Item = ScanItem> {
-    let parallelism = if options.parallel {
-        Parallelism::RayonDefaultPool {
-            busy_timeout: Duration::from_secs(1),
-        }
+    let threads = if options.parallel {
+        std::thread::available_parallelism().map_or(1, NonZero::get)
     } else {
-        Serial
+        1
     };
 
-    WalkDir::new(root.as_ref())
-        .parallelism(parallelism)
-        .skip_hidden(options.skip_hidden)
-        .follow_links(options.follow_links)
-        .into_iter()
-        .map(|entry| match entry {
-            Ok(entry) => match entry.metadata() {
-                Ok(metadata) => ScanItem::Entry {
-                    metadata,
-                    path: entry.path().to_path_buf(),
-                },
+    walk(root.as_ref(), threads, Order::Completion, |_| true).map(|entry| match entry {
+        Ok(entry) => {
+            let path = entry.path();
+            match entry.metadata {
+                Ok(metadata) => ScanItem::Entry { path, metadata },
                 Err(_) => ScanItem::ReadError,
-            },
-            Err(_) => ScanItem::ReadError,
-        })
+            }
+        }
+        Err(_) => ScanItem::ReadError,
+    })
 }
 
 /// Walk `root` and populate a [`FileTree`]. Returns the tree and a count of read failures.
