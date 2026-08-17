@@ -20,7 +20,7 @@ fn scan_folder_finds_files() {
 
     let options = ScanOptions {
         parallel: false,
-        ..ScanOptions::default()
+        show_apparent_size: false,
     };
     let entries: Vec<_> = scan_folder(&dir, options)
         .filter_map(|item| match item {
@@ -47,7 +47,6 @@ fn scan_into_tree_aggregates_sizes() {
     let options = ScanOptions {
         parallel: false,
         show_apparent_size: true,
-        ..ScanOptions::default()
     };
     let (tree, failed) = scan_into_tree(&dir, options);
 

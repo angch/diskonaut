@@ -103,6 +103,19 @@ fn start<B>(
     let running = Arc::new(AtomicBool::new(true));
     let loaded = Arc::new(AtomicBool::new(false));
 
+    // Constructed before any thread reads stdin: `App::new` clears the terminal, which
+    // queries the cursor position by writing a CPR request and reading its reply straight off
+    // stdin. If `stdin_handler` were already polling stdin for input events, it could steal that
+    // reply out from under the query, leaving it blocked until the next real keypress arrived and
+    // the screen showing nothing in the meantime.
+    let mut app = App::new(
+        terminal_backend,
+        path.clone(),
+        event_sender,
+        show_apparent_size,
+        keybinds.clone(),
+    );
+
     active_threads.push(
         thread::Builder::new()
             .name("event_executer".to_string())
@@ -162,8 +175,6 @@ fn start<B>(
                     let scan_options = ScanOptions {
                         parallel: true,
                         show_apparent_size,
-                        skip_hidden: false,
-                        follow_links: false,
                     };
                     'scanning: for item in scan_folder(&path, scan_options) {
                         let instruction_sent = match item {
@@ -208,13 +219,6 @@ fn start<B>(
             .unwrap(),
     );
 
-    let mut app = App::new(
-        terminal_backend,
-        path,
-        event_sender,
-        show_apparent_size,
-        keybinds,
-    );
     app.start(instruction_receiver);
     running.store(false, Ordering::Release);
 

@@ -29,8 +29,6 @@ fn app_with_scanned_dir(dir: &PathBuf, width: u16, height: u16) -> App<TestBacke
     let options = ScanOptions {
         parallel: false,
         show_apparent_size: true,
-        skip_hidden: false,
-        follow_links: false,
     };
     for item in scan_folder(dir, options) {
         if let ScanItem::Entry {

@@ -12,7 +12,7 @@ version = "0.12.2"
 
 [workspace.dependencies]
 clap = { version = "4", features = ["derive"] }
-jwalk = "0.8"
+dua-core = "3"
 libdiskonaut = { path = "libdiskonaut" }
 rustix = { version = "1", default-features = false, features = ["process"] }
 serde = { version = "1", features = ["derive"] }
