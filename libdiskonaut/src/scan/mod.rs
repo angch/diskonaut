@@ -4,7 +4,7 @@ use ::std::fs::Metadata;
 use ::std::num::NonZero;
 use ::std::path::{Path, PathBuf};
 
-use ::dua_core::{Order, walk};
+use ::dua_core::{Options, Order, walk};
 
 use crate::model::{FileTree, Folder};
 
@@ -41,7 +41,14 @@ pub fn scan_folder(root: impl AsRef<Path>, options: ScanOptions) -> impl Iterato
         1
     };
 
-    walk(root.as_ref(), threads, Order::Completion, |_| true).map(|entry| match entry {
+    walk(
+        root.as_ref(),
+        threads,
+        Order::Completion,
+        Options::default(),
+        |_| true,
+    )
+    .map(|entry| match entry {
         Ok(entry) => {
             let path = entry.path();
             match entry.metadata {
