@@ -7,6 +7,23 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.13.0] - 2026-09-04
+
+### Changed
+
+- Directory walk: **`jwalk` → `dua-core`**.
+- `ratatui`'s `crossterm` feature is used instead of a direct `crossterm` dependency.
+- `README.md` trimmed down.
+- Dependency bumps: `clap` 4.6.5 → 4.6.6, `thiserror` 2.0.18 → 2.0.20, `toml` 1.1.2+spec-1.1.0 → 1.1.4+spec-1.1.0, `ratatui` 0.30.0 → 0.30.2, `actions/checkout` 6 → 7, `codecov/codecov-action` 6 → 7.
+
+### Fixed
+
+- TUI not rendering on initial start, caused by a race between the stdin event-reader thread and the terminal's cursor-position query during startup.
+
+### Added
+
+- `docs/ARCHITECTURE.md`.
+
 ## [0.12.2] - 2026-05-28
 
 ### Added
