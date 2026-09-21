@@ -1,11 +1,11 @@
 use ::ratatui::backend::Backend;
-use ::std::fs::{self, Metadata};
+use ::std::fs;
 use ::std::mem::ManuallyDrop;
 use ::std::path::PathBuf;
 use ::std::sync::mpsc::{Receiver, SyncSender};
 
 use libdiskonaut::tiles::Board;
-use libdiskonaut::{FileOrFolder, FileToDelete, FileTree, Folder};
+use libdiskonaut::{DirEntries, FileOrFolder, FileToDelete, FileTree, Folder};
 
 use crate::Event;
 use crate::config::Keybinds;
@@ -50,17 +50,12 @@ where
         terminal_backend: B,
         path_in_filesystem: PathBuf,
         event_sender: SyncSender<Event>,
-        show_apparent_size: bool,
         keybinds: Keybinds,
     ) -> Self {
         let display = Display::new(terminal_backend);
         let board = Board::new(&Folder::new(&path_in_filesystem));
         let base_folder = Folder::new(&path_in_filesystem);
-        let file_tree = ManuallyDrop::new(FileTree::new(
-            base_folder,
-            path_in_filesystem,
-            show_apparent_size,
-        ));
+        let file_tree = ManuallyDrop::new(FileTree::new(base_folder, path_in_filesystem));
         // we use ManuallyDrop here because otherwise the app takes forever to exit
         let ui_effects = UiEffects::new();
         App {
@@ -116,9 +111,20 @@ where
         self.loaded = true;
         self.render_and_update_board();
     }
-    pub fn add_entry_to_base_folder(&mut self, file_metadata: &Metadata, entry_path: PathBuf) {
-        self.file_tree.add_entry(file_metadata, &entry_path);
-        self.ui_effects.last_read_path = Some(entry_path);
+    /// Add several scanned directories at once, showing only the last one in the UI.
+    pub fn add_scanned_directories(&mut self, directories: Vec<DirEntries>) {
+        let mut failed = 0;
+        let mut last_path = None;
+        for directory in &directories {
+            failed += directory.failed;
+            self.file_tree
+                .add_dir_entries(&directory.path, &directory.entries);
+            last_path = Some(directory.path.to_path_buf());
+        }
+        self.file_tree.failed_to_read += failed;
+        if last_path.is_some() {
+            self.ui_effects.last_read_path = last_path;
+        }
     }
     pub fn reset_ui_mode(&mut self) {
         match self.ui_mode {
@@ -261,9 +267,6 @@ where
                 self.render();
             }
         }
-    }
-    pub fn increment_failed_to_read(&mut self) {
-        self.file_tree.failed_to_read += 1;
     }
     pub fn zoom_in(&mut self) {
         let current_folder = self.file_tree.get_current_folder();

@@ -1,4 +1,5 @@
 mod app;
+mod bench;
 mod cli;
 mod config;
 mod error;
@@ -19,7 +20,7 @@ use ::std::{thread, time};
 use clap::Parser;
 use cli::Opt;
 use error::Error;
-use libdiskonaut::{ScanItem, ScanOptions, scan_folder};
+use libdiskonaut::{ScanOptions, scan_directories};
 
 use ::ratatui::backend::Backend;
 use ratatui::backend::CrosstermBackend;
@@ -30,6 +31,12 @@ use app::{App, UiMode};
 use config::DiskonautConfig;
 use input::{TerminalEvents, needs_quit_delay};
 use messages::{Event, Instruction, handle_events};
+
+/// Number of scanned entries batched into one message to the UI thread.
+///
+/// A whole-disk scan produces millions of entries; a channel round-trip per entry, as this once
+/// did, costs more than reading the filesystem.
+const SCAN_BATCH_SIZE: usize = 4096;
 
 fn main() {
     if let Err(err) = try_main() {
@@ -61,6 +68,22 @@ fn try_main() -> Result<(), Error> {
             source,
         })?;
     let show_apparent_size = opts.apparent_size || diskonaut_config.base.apparent_size;
+
+    if opts.benchmark {
+        let folder = opts.resolve_folder()?;
+        bench::run(
+            &folder,
+            opts.bench_stage,
+            ScanOptions {
+                parallel: !opts.single_thread,
+                threads: opts.threads,
+                show_apparent_size,
+                max_depth: opts.max_depth,
+            },
+            opts.bench_repeat,
+        );
+        return Ok(());
+    }
 
     match get_stdout() {
         Ok(stdout) => {
@@ -108,13 +131,7 @@ fn start<B>(
     // stdin. If `stdin_handler` were already polling stdin for input events, it could steal that
     // reply out from under the query, leaving it blocked until the next real keypress arrived and
     // the screen showing nothing in the meantime.
-    let mut app = App::new(
-        terminal_backend,
-        path.clone(),
-        event_sender,
-        show_apparent_size,
-        keybinds.clone(),
-    );
+    let mut app = App::new(terminal_backend, path.clone(), event_sender, keybinds.clone());
 
     active_threads.push(
         thread::Builder::new()
@@ -174,26 +191,30 @@ fn start<B>(
                 move || {
                     let scan_options = ScanOptions {
                         parallel: true,
+                        threads: None,
                         show_apparent_size,
+                        max_depth: None,
                     };
-                    'scanning: for item in scan_folder(&path, scan_options) {
-                        let instruction_sent = match item {
-                            ScanItem::Entry {
-                                metadata: file_metadata,
-                                path: entry_path,
-                            } => instruction_sender.send(Instruction::AddEntryToBaseFolder((
-                                file_metadata,
-                                entry_path,
-                            ))),
-                            ScanItem::ReadError => {
-                                instruction_sender.send(Instruction::IncrementFailedToRead)
+                    let mut batch = Vec::new();
+                    let mut batched_entries = 0usize;
+                    'scanning: for directory in scan_directories(&path, scan_options) {
+                        batched_entries += directory.entries.len().max(1);
+                        batch.push(directory);
+                        if batched_entries >= SCAN_BATCH_SIZE {
+                            batched_entries = 0;
+                            let full = std::mem::take(&mut batch);
+                            if instruction_sender
+                                .send(Instruction::AddScannedDirectories(full))
+                                .is_err()
+                            {
+                                // if we fail to send an instruction here, this likely means the program has
+                                // ended and we need to break this loop as well in order not to hang
+                                break 'scanning;
                             }
-                        };
-                        if instruction_sent.is_err() {
-                            // if we fail to send an instruction here, this likely means the program has
-                            // ended and we need to break this loop as well in order not to hang
-                            break 'scanning;
-                        };
+                        }
+                    }
+                    if !batch.is_empty() {
+                        let _ = instruction_sender.send(Instruction::AddScannedDirectories(batch));
                     }
                     let _ = instruction_sender.send(Instruction::StartUi);
                     loaded.store(true, Ordering::Release);

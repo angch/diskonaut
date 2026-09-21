@@ -1,10 +1,10 @@
 use ::std::ffi::{OsStr, OsString};
 use ::std::fs::{self, File};
 use ::std::io::Write;
-use ::std::path::PathBuf;
+use ::std::path::{Path, PathBuf};
 use ::std::sync::mpsc;
 
-use libdiskonaut::{ScanItem, ScanOptions, scan_folder};
+use libdiskonaut::{DirEntries, NamedEntry, ScanOptions, scan_directories};
 use ratatui::backend::TestBackend;
 
 use super::{App, UiMode};
@@ -17,28 +17,20 @@ fn temp_app_dir(name: &str) -> PathBuf {
     dir
 }
 
-fn app_with_scanned_dir(dir: &PathBuf, width: u16, height: u16) -> App<TestBackend> {
+fn app_with_scanned_dir(dir: &Path, width: u16, height: u16) -> App<TestBackend> {
     let (tx, _rx) = mpsc::sync_channel(1);
     let mut app = App::new(
         TestBackend::new(width, height),
-        dir.clone(),
+        dir.to_path_buf(),
         tx,
-        true,
         Keybinds::default(),
     );
     let options = ScanOptions {
         parallel: false,
         show_apparent_size: true,
+        ..ScanOptions::default()
     };
-    for item in scan_folder(dir, options) {
-        if let ScanItem::Entry {
-            metadata,
-            path: entry_path,
-        } = item
-        {
-            app.add_entry_to_base_folder(&metadata, entry_path);
-        }
-    }
+    app.add_scanned_directories(scan_directories(dir, options).collect());
     app.start_ui();
     app
 }
@@ -101,11 +93,20 @@ fn prompt_file_deletion_shows_confirmation() {
         TestBackend::new(80, 24),
         dir.clone(),
         tx,
-        true,
         Keybinds::default(),
     );
     let meta = fs::metadata(&target).expect("metadata");
-    app.add_entry_to_base_folder(&meta, target.clone());
+    app.add_scanned_directories(vec![DirEntries {
+        path: std::sync::Arc::from(dir.as_path()),
+        entries: vec![NamedEntry {
+            name: OsStr::new("remove_me.txt").to_os_string(),
+            meta: libdiskonaut::EntryMeta {
+                size: meta.len(),
+                is_dir: false,
+            },
+        }],
+        failed: 0,
+    }]);
     app.start_ui();
     let file_index = app
         .board

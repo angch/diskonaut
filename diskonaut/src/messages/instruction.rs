@@ -1,5 +1,3 @@
-use ::std::fs::Metadata;
-use ::std::path::PathBuf;
 use ::std::sync::mpsc::Receiver;
 
 use ::ratatui::backend::Backend;
@@ -10,6 +8,8 @@ use crate::input::{
     handle_keypress_loading_mode, handle_keypress_normal_mode, handle_keypress_screen_too_small,
     handle_keypress_warning_message,
 };
+use libdiskonaut::DirEntries;
+
 use crate::{App, UiMode};
 
 pub enum Instruction {
@@ -17,14 +17,13 @@ pub enum Instruction {
     ResetCurrentPathColor,
     FlashSpaceFreed,
     UnflashSpaceFreed,
-    AddEntryToBaseFolder((Metadata, PathBuf)),
+    AddScannedDirectories(Vec<DirEntries>),
     StartUi,
     ToggleScanningVisualIndicator,
     RenderAndUpdateBoard,
     Render,
     ResetUiMode,
     Keypress(BackEvent),
-    IncrementFailedToRead,
 }
 
 pub fn handle_instructions<B>(app: &mut App<B>, receiver: Receiver<Instruction>)
@@ -48,8 +47,8 @@ where
             Instruction::UnflashSpaceFreed => {
                 app.unflash_space_freed();
             }
-            Instruction::AddEntryToBaseFolder((file_metadata, entry)) => {
-                app.add_entry_to_base_folder(&file_metadata, entry);
+            Instruction::AddScannedDirectories(directories) => {
+                app.add_scanned_directories(directories);
             }
             Instruction::StartUi => {
                 app.start_ui();
@@ -94,9 +93,6 @@ where
                 if !app.is_running {
                     break;
                 }
-            }
-            Instruction::IncrementFailedToRead => {
-                app.increment_failed_to_read();
             }
         }
     }

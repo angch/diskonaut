@@ -1,8 +1,8 @@
 use ::std::ffi::{OsStr, OsString};
-use ::std::fs::Metadata;
 use ::std::path::{Path, PathBuf};
 
 use crate::model::{FileOrFolder, FileToDelete, Folder};
+use crate::scan::{EntryMeta, NamedEntry};
 
 pub struct FileTree {
     pub current_folder_names: Vec<OsString>,
@@ -10,18 +10,20 @@ pub struct FileTree {
     pub failed_to_read: u64,
     pub path_in_filesystem: PathBuf,
     base_folder: Folder,
-    show_apparent_size: bool,
+    /// Component count of `path_in_filesystem`, cached so that every entry added during a scan
+    /// does not re-walk the root path to find where its relative part begins.
+    base_component_count: usize,
 }
 
 impl FileTree {
-    pub fn new(base_folder: Folder, path_in_filesystem: PathBuf, show_apparent_size: bool) -> Self {
+    pub fn new(base_folder: Folder, path_in_filesystem: PathBuf) -> Self {
         FileTree {
             base_folder,
             current_folder_names: Vec::new(),
+            base_component_count: path_in_filesystem.components().count(),
             path_in_filesystem,
             space_freed: 0,
             failed_to_read: 0,
-            show_apparent_size,
         }
     }
     pub fn get_total_size(&self) -> u128 {
@@ -68,13 +70,22 @@ impl FileTree {
         let path_to_delete = &file_to_delete.path_to_file;
         self.base_folder.delete_path(path_to_delete);
     }
-    pub fn add_entry(&mut self, entry_metadata: &Metadata, entry_full_path: &Path) {
-        let base_path_length = self.path_in_filesystem.components().count();
-        let mut relative_path = PathBuf::new();
-        for dir in entry_full_path.components().skip(base_path_length) {
-            relative_path.push(dir);
-        }
-        self.base_folder
-            .add_entry(entry_metadata, relative_path, self.show_apparent_size);
+    /// Add every entry of one directory at once.
+    ///
+    /// Resolving `dir_path` is O(depth), and doing it once for the whole directory rather than
+    /// once per entry is what keeps tree building off the critical path of a fast walk.
+    pub fn add_dir_entries(&mut self, dir_path: &Path, entries: &[NamedEntry]) {
+        let relative = dir_path
+            .components()
+            .skip(self.base_component_count)
+            .map(|component| component.as_os_str());
+        self.base_folder.add_dir_entries(relative, entries);
+    }
+    pub fn add_entry(&mut self, meta: EntryMeta, entry_full_path: &Path) {
+        let relative = entry_full_path
+            .components()
+            .skip(self.base_component_count)
+            .map(|component| component.as_os_str());
+        self.base_folder.add_entry(meta, relative);
     }
 }
