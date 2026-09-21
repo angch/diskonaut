@@ -1,8 +1,8 @@
 use ::std::ffi::{OsStr, OsString};
-use ::std::fs::Metadata;
-use ::std::path::{Path, PathBuf};
+use ::std::path::{Component, Path, PathBuf};
 
 use crate::model::{FileOrFolder, FileToDelete, Folder};
+use crate::scan::{EntryMeta, NamedEntry};
 
 pub struct FileTree {
     pub current_folder_names: Vec<OsString>,
@@ -10,18 +10,16 @@ pub struct FileTree {
     pub failed_to_read: u64,
     pub path_in_filesystem: PathBuf,
     base_folder: Folder,
-    show_apparent_size: bool,
 }
 
 impl FileTree {
-    pub fn new(base_folder: Folder, path_in_filesystem: PathBuf, show_apparent_size: bool) -> Self {
+    pub fn new(base_folder: Folder, path_in_filesystem: PathBuf) -> Self {
         FileTree {
             base_folder,
             current_folder_names: Vec::new(),
             path_in_filesystem,
             space_freed: 0,
             failed_to_read: 0,
-            show_apparent_size,
         }
     }
     pub fn get_total_size(&self) -> u128 {
@@ -68,13 +66,24 @@ impl FileTree {
         let path_to_delete = &file_to_delete.path_to_file;
         self.base_folder.delete_path(path_to_delete);
     }
-    pub fn add_entry(&mut self, entry_metadata: &Metadata, entry_full_path: &Path) {
-        let base_path_length = self.path_in_filesystem.components().count();
-        let mut relative_path = PathBuf::new();
-        for dir in entry_full_path.components().skip(base_path_length) {
-            relative_path.push(dir);
-        }
+    /// Add every entry of one directory at once.
+    ///
+    /// Resolving `dir_path` is O(depth), and doing it once for the whole directory rather than
+    /// once per entry is what keeps tree building off the critical path of a fast walk.
+    pub fn add_dir_entries(&mut self, dir_path: &Path, entries: &[NamedEntry]) {
+        // A directory from outside the scanned tree has no place in it. Silently folding such a
+        // path into the base folder, as skipping a component count would, invents entries.
+        let Ok(relative) = dir_path.strip_prefix(&self.path_in_filesystem) else {
+            return;
+        };
         self.base_folder
-            .add_entry(entry_metadata, relative_path, self.show_apparent_size);
+            .add_dir_entries(relative.components().map(Component::as_os_str), entries);
+    }
+    pub fn add_entry(&mut self, meta: EntryMeta, entry_full_path: &Path) {
+        let Ok(relative) = entry_full_path.strip_prefix(&self.path_in_filesystem) else {
+            return;
+        };
+        self.base_folder
+            .add_entry(meta, relative.components().map(Component::as_os_str));
     }
 }

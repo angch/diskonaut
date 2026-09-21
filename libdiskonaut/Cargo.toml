@@ -10,6 +10,7 @@ readme = "../README.md"
 
 [dependencies]
 dua-core = { workspace = true }
+libc = { workspace = true }
 rustix = { workspace = true }
 thiserror = { workspace = true }
 unicode-width = { workspace = true }

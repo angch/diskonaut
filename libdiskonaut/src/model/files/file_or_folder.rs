@@ -1,9 +1,8 @@
 use ::std::collections::{HashMap, VecDeque};
-use ::std::ffi::OsString;
-use ::std::fs::Metadata;
+use ::std::ffi::{OsStr, OsString};
 use ::std::path::{Path, PathBuf};
 
-use crate::os::size_on_disk_fast;
+use crate::scan::{EntryMeta, NamedEntry};
 
 #[derive(Debug, Clone)]
 pub enum FileOrFolder {
@@ -58,92 +57,118 @@ impl Folder {
         }
     }
 
-    pub fn add_entry(
+    /// Insert an entry addressed by its path components relative to this folder.
+    ///
+    /// The descent is iterative and borrows each component, so inserting a file `n` levels deep
+    /// costs `n` hash lookups and one name allocation for the levels that are new, rather than
+    /// rebuilding a `PathBuf` suffix at every level as the recursive version did.
+    pub fn add_entry<'a>(
         &mut self,
-        entry_metadata: &Metadata,
-        relative_path: PathBuf,
-        show_apparent_size: bool,
+        meta: EntryMeta,
+        relative_path: impl Iterator<Item = &'a OsStr>,
     ) {
-        // apparent_size (named after the flag of the same name in 'du')
-        // means "show the file size, rather than the actual space it takes on disk"
-        // these may differ (for example) in filesystems that use compression
-        if entry_metadata.is_dir() {
-            self.add_folder(relative_path);
-        } else {
-            let size = if show_apparent_size {
-                entry_metadata.len() as u128
+        let size = u128::from(meta.size);
+        let mut components = relative_path.peekable();
+        let mut folder = self;
+
+        while let Some(name) = components.next() {
+            if !meta.is_dir {
+                folder.size += size;
+            }
+            folder.num_descendants += 1;
+
+            if components.peek().is_some() {
+                folder = match folder
+                    .contents
+                    .entry(name.to_os_string())
+                    .or_insert_with(|| FileOrFolder::Folder(Folder::from(name.to_os_string())))
+                {
+                    FileOrFolder::Folder(folder) => folder,
+                    FileOrFolder::File(_) => unreachable!("got a file in the middle of a path"),
+                };
+            } else if meta.is_dir {
+                // A directory can already exist here if one of its children was reported first.
+                folder
+                    .contents
+                    .entry(name.to_os_string())
+                    .or_insert_with(|| FileOrFolder::Folder(Folder::from(name.to_os_string())));
             } else {
-                size_on_disk_fast(entry_metadata) as u128
+                folder.contents.insert(
+                    name.to_os_string(),
+                    FileOrFolder::File(File {
+                        name: name.to_os_string(),
+                        size,
+                    }),
+                );
+            }
+        }
+    }
+
+    /// Add every entry of one directory, given that directory's path relative to this folder.
+    pub fn add_dir_entries<'a>(
+        &mut self,
+        dir_path: impl Iterator<Item = &'a OsStr>,
+        entries: &[NamedEntry],
+    ) {
+        let contained_size: u128 = entries
+            .iter()
+            .filter(|entry| !entry.meta.is_dir)
+            .map(|entry| u128::from(entry.meta.size))
+            .sum();
+        let contained_count = entries.len() as u64;
+
+        let mut folder = self;
+        folder.size += contained_size;
+        folder.num_descendants += contained_count;
+        for name in dir_path {
+            folder = match folder
+                .contents
+                .entry(name.to_os_string())
+                .or_insert_with(|| FileOrFolder::Folder(Folder::from(name.to_os_string())))
+            {
+                FileOrFolder::Folder(folder) => folder,
+                FileOrFolder::File(_) => unreachable!("got a file in the middle of a path"),
             };
-            self.add_file(relative_path, size);
+            folder.size += contained_size;
+            folder.num_descendants += contained_count;
+        }
+
+        for entry in entries {
+            if entry.meta.is_dir {
+                // The directory may already be here if its own contents were read first.
+                folder
+                    .contents
+                    .entry(entry.name.clone())
+                    .or_insert_with(|| FileOrFolder::Folder(Folder::from(entry.name.clone())));
+            } else {
+                folder.contents.insert(
+                    entry.name.clone(),
+                    FileOrFolder::File(File {
+                        name: entry.name.clone(),
+                        size: u128::from(entry.meta.size),
+                    }),
+                );
+            }
         }
     }
 
     pub fn add_folder(&mut self, path: PathBuf) {
-        let path_length = path.components().count();
-        if path_length == 0 {
-            return;
-        }
-        if path_length > 1 {
-            let name = path
-                .iter()
-                .next()
-                .expect("could not get next path element for folder")
-                .to_os_string();
-            let path_entry = self
-                .contents
-                .entry(name.clone())
-                .or_insert(FileOrFolder::Folder(Folder::from(name)));
-            self.num_descendants += 1;
-            match path_entry {
-                FileOrFolder::Folder(folder) => folder.add_folder(path.iter().skip(1).collect()),
-                _ => unreachable!("got a file in the middle of a path"),
-            };
-        } else {
-            let name = path
-                .iter()
-                .next()
-                .expect("could not get next path element for file")
-                .to_os_string();
-            self.num_descendants += 1;
-            self.contents
-                .insert(name.clone(), FileOrFolder::Folder(Folder::from(name)));
-        }
+        self.add_entry(
+            EntryMeta {
+                size: 0,
+                is_dir: true,
+            },
+            path.components().map(|component| component.as_os_str()),
+        );
     }
     pub fn add_file(&mut self, path: PathBuf, size: u128) {
-        let path_length = path.components().count();
-        if path_length == 0 {
-            return;
-        }
-        if path_length > 1 {
-            let name = path
-                .iter()
-                .next()
-                .expect("could not get next path element for folder")
-                .to_os_string();
-            let path_entry = self
-                .contents
-                .entry(name.clone())
-                .or_insert(FileOrFolder::Folder(Folder::from(name)));
-            self.size += size;
-            self.num_descendants += 1;
-            match path_entry {
-                FileOrFolder::Folder(folder) => {
-                    folder.add_file(path.iter().skip(1).collect(), size);
-                }
-                _ => unreachable!("got a file in the middle of a path"),
-            };
-        } else {
-            let name = path
-                .iter()
-                .next()
-                .expect("could not get next path element for file")
-                .to_os_string();
-            self.size += size;
-            self.num_descendants += 1;
-            self.contents
-                .insert(name.clone(), FileOrFolder::File(File { name, size }));
-        }
+        self.add_entry(
+            EntryMeta {
+                size: u64::try_from(size).unwrap_or(u64::MAX),
+                is_dir: false,
+            },
+            path.components().map(|component| component.as_os_str()),
+        );
     }
     pub fn path(&self, mut folder_names: Vec<OsString>) -> Option<&FileOrFolder> {
         let next_folder_name = folder_names.remove(0);

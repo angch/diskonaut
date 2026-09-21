@@ -319,6 +319,7 @@ name = "diskonaut"
 version = "0.13.0"
 dependencies = [
  "clap",
+ "dua-core",
  "libdiskonaut",
  "ratatui",
  "serde",
@@ -484,6 +485,7 @@ name = "libdiskonaut"
 version = "0.13.0"
 dependencies = [
  "dua-core",
+ "libc",
  "rustix",
  "thiserror",
  "unicode-width",

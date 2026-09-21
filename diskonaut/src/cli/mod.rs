@@ -16,6 +16,24 @@ pub struct Opt {
     /// Path to config file (default: `~/.config/diskonaut/config.toml`)
     #[arg(short = 'c', long, value_name = "FILE")]
     pub config: Option<PathBuf>,
+    /// Scan headlessly and report timings instead of starting the UI
+    #[arg(long)]
+    pub benchmark: bool,
+    /// Which part of the scan pipeline to time under `--benchmark`
+    #[arg(long, value_name = "STAGE", default_value = "all")]
+    pub bench_stage: crate::bench::BenchStage,
+    /// Repeat each benchmark stage this many times
+    #[arg(long, value_name = "N", default_value_t = 1)]
+    pub bench_repeat: u32,
+    /// Stop descending below this depth (partial scans; the root is depth 0)
+    #[arg(long, value_name = "N")]
+    pub max_depth: Option<usize>,
+    /// Scan with a single thread
+    #[arg(long)]
+    pub single_thread: bool,
+    /// Number of scan worker threads (default: one per core)
+    #[arg(long, value_name = "N")]
+    pub threads: Option<usize>,
 }
 
 impl Opt {

@@ -38,8 +38,14 @@ fn file_tree_delete_path() {
     f.write_all(b"x").expect("write");
 
     let metadata = fs::metadata(&file_path).expect("metadata");
-    let mut tree = FileTree::new(Folder::new(&dir), dir.clone(), true);
-    tree.add_entry(&metadata, &file_path);
+    let mut tree = FileTree::new(Folder::new(&dir), dir.clone());
+    tree.add_entry(
+        crate::EntryMeta {
+            size: metadata.len(),
+            is_dir: false,
+        },
+        &file_path,
+    );
     assert_eq!(tree.get_total_descendants(), 1);
 
     let to_delete = crate::FileToDelete {
