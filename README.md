@@ -10,6 +10,7 @@
 - **Apparent or on-disk size** — default shows blocks allocated on disk; `-a` uses logical file size
 - **Hard-link aware** — a file reached by several names counts once in each folder that holds it
 - **Unix-native** — Linux, macOS, and BSD; built on `ratatui` and parallel directory walking
+- **Stays put on request** — `-x` keeps the scan on one filesystem, like `du -x`
 
 ## Requirements
 
@@ -36,6 +37,16 @@ Two things follow that are worth knowing:
   optimistic in that case. A rescan restores the true picture.
 
 `docs/scan-performance.md` covers the details and the reasoning.
+
+## Filesystems and mount points
+
+By default the scan crosses mount points, like `du`. Pass `-x` / `--one-file-system` to keep it on
+the filesystem the scan started on.
+
+One thing is skipped either way: a mount point that leads back to the filesystem the scan started
+on, because those files are already being counted by another path. On macOS that is
+`/System/Volumes/Data`, which is both a mount point and grafted into `/` through firmlinks — follow
+both and almost every file on the machine is counted twice.
 
 ## Benchmarking the scan
 

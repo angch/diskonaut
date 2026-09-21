@@ -24,7 +24,8 @@ Whole disk, `/`, both stages from one run of the same binary:
 | | time | entries | unreadable | reported size |
 | --- | --- | --- | --- | --- |
 | before (`dua-tree`) | 59.9s | 20,300,480 | 986 | 1.4 TiB |
-| after (`pipeline`) | 38.5s | 10,382,943 | 468 | 705.5 GiB |
+| after (`tree`) | 36.5s | 10,409,705 | 479 | 716.5 GiB |
+| after, with `-x` | 36.4s | 10,389,061 | 473 | 688.8 GiB |
 
 The entry count is the more interesting column. The volume has ~11M inodes, so the old scan was
 visiting nearly everything twice, and the 1.4 TiB it reported was about 1.6x the 884 GiB actually
@@ -119,9 +120,21 @@ if read.inode != job.listed_inode && !job.firmlink {
 Firmlinks are the deliberate exception — they are the only route to what they point at, so they
 stay followed. `SF_FIRMLINK` (`0x00800000`) in the entry's `ATTR_CMN_FLAGS` identifies them.
 
-The same rule incidentally gives `du -x` behaviour for ordinary mounts: external volumes under
-`/Volumes`, and the auxiliary APFS volumes (`VM`, `Preboot`, `Update`, `xarts`, `iSCPreboot`, …)
-are not descended into.
+The skip is deliberately narrow: it applies only where the mount leads back to the filesystem the
+scan started on, which is what makes it a *second* route to files already being counted. Genuinely
+separate filesystems are crossed by default, like `du`, and `-x` / `--one-file-system` declines to
+cross those too. On this machine the difference is the auxiliary APFS volumes (`VM`, `Preboot`,
+`Update`, `xarts`, `iSCPreboot`, `Hardware`), worth 27.7 GiB and about 20,000 entries.
+
+An earlier version of this fix skipped *every* mount point, which also stops the double count but
+takes `-x` behaviour away from anyone who wanted the default. Worth noting because it looks
+equivalent from the `/` benchmark alone; the difference only shows on a machine with other volumes
+mounted, and scanning a directory that contains nothing but mount points then reports nothing at
+all.
+
+One known limitation: because the discriminator is "same filesystem as the scan root", scanning
+`/System/Volumes` directly will not descend into `Data`, even though nothing else in that scan
+reaches it. Scanning `/` or `/System/Volumes/Data` behaves as expected.
 
 ### 3. More threads is slower
 
@@ -322,9 +335,12 @@ genuinely different same-size files that collide on an inode number across volum
 merged; that needs both to be hard-linked as well, which makes it unlikely rather than impossible.
 
 **Only files with more than one link are tracked.** Everything else takes the plain additive path,
-which is what keeps the cost invisible: a whole-disk scan here found 19,283 distinct hard-linked
-files out of 10.4M entries, so the ledger is negligible and the measured scan time did not move.
-It did move the total, by about 16 GiB — that much of the disk was being counted twice.
+which is what keeps the cost invisible: a whole-disk scan here found about 20,000 distinct
+hard-linked files out of 10.4M entries, so the ledger is negligible and the measured scan time did
+not move. It did move the total, by about 16 GiB — that much of the disk was being counted twice.
+
+The walk supplies the two fields this needs, `EntryMeta::inode` and `EntryMeta::links`. Anything
+that does not fill them in gets the old additive behaviour rather than a wrong answer.
 
 ## What is macOS-specific
 

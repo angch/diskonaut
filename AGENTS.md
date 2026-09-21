@@ -5,7 +5,7 @@
 **Diskonaut** is an interactive terminal disk space navigator (TUI) written in Rust. It visualizes
 disk usage via a squarify treemap, supports live scanning, and allows deleting large files in-place.
 
-**Workspace layout** (Rust 2024 edition, version 0.12.2):
+**Workspace layout** (Rust 2024 edition, version 0.13.0):
 ```
 diskonaut/
 ├── libdiskonaut/     # Core library: model, scan, treemap, formatting, os
@@ -43,7 +43,7 @@ Five concurrent threads communicate via bounded `mpsc` channels:
 | Thread | Role |
 |--------|------|
 | `stdin_handler` | Reads crossterm events → `Instruction::Keypress` |
-| `hd_scanner` | `jwalk` parallel walk → `Instruction::AddEntryToBaseFolder` |
+| `hd_scanner` | parallel walk → `Instruction::AddScannedDirectories` (batched, ~4096 entries) |
 | `event_executer` | Converts `Event` → `Instruction` (visual feedback) |
 | `loading_loop` | Toggles loading indicator while scanning |
 | **main** | App state mutations + ratatui rendering |
@@ -54,7 +54,9 @@ Five concurrent threads communicate via bounded `mpsc` channels:
 
 **`libdiskonaut`** — pure logic, no TUI:
 - `model/files/file_tree.rs` — `FileTree`: hierarchical navigation, deletion tracking
-- `scan/mod.rs` — `scan_folder()`: parallel jwalk wrapper, `ScanItem` iterator
+- `scan/mod.rs` — `scan_directories()`: per-directory batches, the seam every walker plugs into
+- `scan/bulk.rs` — macOS walker on `getattrlistbulk(2)` (see `docs/scan-performance.md`)
+- `model/files/hard_links.rs` — charges a hard-linked file to each folder once
 - `tiles/treemap.rs` — squarify algorithm (`HEIGHT_WIDTH_RATIO = 2.5`)
 - `tiles/board.rs` — `Board`: tile selection, zoom stack, navigation
 - `format/display_size.rs` — byte → human-readable (B/KB/MB/GB/TB)
@@ -85,7 +87,9 @@ Exiting { app_loaded: bool }
 ## Key Patterns
 
 - **Render-on-demand**: Render only when an `Instruction` arrives; no continuous loop.
-- **Live treemap update**: `Board` recomputes tiles on every `AddEntryToBaseFolder` during scan.
+- **Live treemap update**: `Board` recomputes tiles as scanned directories arrive.
+- **Sizes are not additive**: a folder's size counts each distinct file once, so hard links make it
+  smaller than the sum of its entries. See `docs/scan-performance.md`.
 - **Zoom as filter**: Zoom level controls which nested folders are rendered.
 - **Modal via enum**: `UiMode` variant change = modal open/close; no separate stack.
 - **Config merging**: CLI `--apparent-size` ORs with config file setting.
@@ -137,8 +141,16 @@ Exiting { app_loaded: bool }
 
 ### Adding a scan option
 1. Add field to `ScanOptions` in `libdiskonaut/src/scan/mod.rs`
-2. Thread it through `scan_folder()` and `jwalk` config
+2. Thread it through **both** walkers: `scan/bulk.rs` (macOS) and the `fallback` module in
+   `scan/mod.rs` (everywhere else). The fallback is `cfg`-selected away on macOS, so it is only
+   ever run by its tests here — do not assume compiling it means it works.
 3. Expose via CLI in `diskonaut/src/cli/mod.rs` and config if persistent
+4. Add a `--benchmark` stage if it changes how the walk performs
+
+### Changing the scan
+Read `docs/scan-performance.md` first. It records what was measured, what turned out not to
+matter, and how to reproduce the numbers with `--benchmark`. The short version: the walk dominates
+and the data model is free, so measure the walker before optimising anything else.
 
 ### Modifying treemap layout
 - Core algorithm: `libdiskonaut/src/tiles/treemap.rs`
@@ -165,4 +177,6 @@ Exiting { app_loaded: bool }
 | `diskonaut/src/app/mod.rs` | ~300+ lines — core state machine |
 | `libdiskonaut/src/tiles/board.rs` | ~200+ lines — tile nav/zoom |
 | `libdiskonaut/src/tiles/treemap.rs` | ~150+ lines — squarify |
-| `libdiskonaut/src/model/files/file_tree.rs` | ~80 lines — folder tree |
+| `libdiskonaut/src/model/files/file_tree.rs` | ~150 lines — folder tree, hard-link accounting |
+| `libdiskonaut/src/scan/bulk.rs` | ~420 lines — macOS `getattrlistbulk` walker |
+| `diskonaut/src/bench/mod.rs` | ~230 lines — `--benchmark` harness |
