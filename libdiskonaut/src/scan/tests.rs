@@ -232,10 +232,155 @@ fn entries_outside_the_scan_root_are_ignored() {
             name: "intruder".into(),
             meta: EntryMeta {
                 size: 4096,
+                links: 1,
                 is_dir: false,
+                ..EntryMeta::default()
             },
         }],
     );
+    assert_eq!(tree.get_total_size(), 0);
+    assert_eq!(tree.get_total_descendants(), 0);
+
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+/// The case that motivates charging a hard-linked file per folder rather than per entry:
+/// `a/a`, `a/b` and `b/a` are all the same 1 KiB file, so `a` holds 1 KiB, `b` holds 1 KiB, and
+/// the root that contains both still holds only 1 KiB.
+#[test]
+fn hard_links_count_once_per_folder() {
+    let dir = temp_scan_dir("hard_links");
+    let a = dir.join("a");
+    let b = dir.join("b");
+    std::fs::create_dir_all(&a).expect("mkdir a");
+    std::fs::create_dir_all(&b).expect("mkdir b");
+
+    let original = a.join("a");
+    File::create(&original)
+        .expect("create file")
+        .write_all(&[7u8; 1024])
+        .expect("write file");
+    std::fs::hard_link(&original, a.join("b")).expect("hard link a/b");
+    std::fs::hard_link(&original, b.join("a")).expect("hard link b/a");
+
+    let options = ScanOptions {
+        show_apparent_size: true,
+        ..ScanOptions::default()
+    };
+    let (tree, failed) = scan_into_tree(&dir, options);
+    assert_eq!(failed, 0);
+    assert_eq!(tree.hard_linked_files(), 1, "one distinct file, three links");
+
+    let folder_size = |name: &str| match tree
+        .get_current_folder()
+        .path(vec![std::ffi::OsString::from(name)])
+        .unwrap_or_else(|| panic!("{name} should exist"))
+    {
+        crate::FileOrFolder::Folder(folder) => folder.size,
+        crate::FileOrFolder::File(_) => panic!("{name} should be a folder"),
+    };
+
+    assert_eq!(folder_size("a"), 1024, "a/a and a/b are the same 1 KiB file");
+    assert_eq!(folder_size("b"), 1024, "b/a is that same file again");
+    assert_eq!(
+        tree.get_total_size(),
+        1024,
+        "the root holds one 1 KiB file however many names point at it"
+    );
+    // Every link is still a directory entry in its own right.
+    assert_eq!(tree.get_total_descendants(), 5, "a, b, a/a, a/b, b/a");
+
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+/// Nested folders must each count the file once, and a folder holding two links to it still
+/// reports one copy.
+#[test]
+fn hard_links_count_once_per_folder_when_nested() {
+    let dir = temp_scan_dir("hard_links_nested");
+    let deep = dir.join("one").join("two");
+    std::fs::create_dir_all(&deep).expect("mkdir one/two");
+    let other = dir.join("other");
+    std::fs::create_dir_all(&other).expect("mkdir other");
+
+    let original = deep.join("file");
+    File::create(&original)
+        .expect("create file")
+        .write_all(&[1u8; 2048])
+        .expect("write file");
+    std::fs::hard_link(&original, deep.join("file-again")).expect("link in the same folder");
+    std::fs::hard_link(&original, other.join("file")).expect("link in a sibling");
+
+    let options = ScanOptions {
+        show_apparent_size: true,
+        ..ScanOptions::default()
+    };
+    let (tree, _) = scan_into_tree(&dir, options);
+
+    let size_of = |path: &[&str]| {
+        let names: Vec<std::ffi::OsString> =
+            path.iter().map(|part| std::ffi::OsString::from(*part)).collect();
+        match tree
+            .get_current_folder()
+            .path(names)
+            .unwrap_or_else(|| panic!("{path:?} should exist"))
+        {
+            crate::FileOrFolder::Folder(folder) => folder.size,
+            crate::FileOrFolder::File(file) => file.size,
+        }
+    };
+
+    assert_eq!(size_of(&["one", "two"]), 2048, "two links, one file");
+    assert_eq!(size_of(&["one"]), 2048);
+    assert_eq!(size_of(&["other"]), 2048, "reachable here too, on its own");
+    assert_eq!(tree.get_total_size(), 2048, "still one file overall");
+
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+/// A file with one link must not go through the hard-link ledger at all.
+#[test]
+fn ordinary_files_are_not_tracked_as_hard_links() {
+    let (dir, _) = fixture_tree("no_hard_links");
+    let options = ScanOptions {
+        show_apparent_size: true,
+        ..ScanOptions::default()
+    };
+    let (tree, _) = scan_into_tree(&dir, options);
+    assert_eq!(tree.hard_linked_files(), 0);
+    assert_eq!(tree.get_total_size(), 50);
+
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+/// Deleting links to a hard-linked file must not drive a folder's size below zero, since that
+/// folder was only ever charged once for all of them.
+#[test]
+fn deleting_every_link_in_a_folder_does_not_underflow() {
+    let dir = temp_scan_dir("hard_links_delete");
+    let original = dir.join("one");
+    File::create(&original)
+        .expect("create file")
+        .write_all(&[3u8; 512])
+        .expect("write file");
+    std::fs::hard_link(&original, dir.join("two")).expect("hard link");
+
+    let options = ScanOptions {
+        show_apparent_size: true,
+        ..ScanOptions::default()
+    };
+    let (mut tree, _) = scan_into_tree(&dir, options);
+    assert_eq!(tree.get_total_size(), 512, "two names, one file");
+
+    for name in ["one", "two"] {
+        tree.delete_file(&crate::FileToDelete {
+            path_in_filesystem: dir.clone(),
+            path_to_file: vec![std::ffi::OsString::from(name)],
+            file_type: crate::tiles::FileType::File,
+            num_descendants: None,
+            size: 512,
+        });
+    }
     assert_eq!(tree.get_total_size(), 0);
     assert_eq!(tree.get_total_descendants(), 0);
 

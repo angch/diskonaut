@@ -53,6 +53,8 @@ struct StageResult {
     entries: u64,
     failed: u64,
     total_size: u128,
+    /// Distinct hard-linked files, counted once however many names point at them.
+    hard_linked: usize,
 }
 
 impl StageResult {
@@ -63,14 +65,20 @@ impl StageResult {
         } else {
             0.0
         };
+        let hard_linked = if self.hard_linked > 0 {
+            format!("  {} hard-linked", self.hard_linked)
+        } else {
+            String::new()
+        };
         println!(
-            "{:<11}{:>8.3}s  {:>11} entries  {:>10.0} entries/s  {:>7} unreadable  {:>10}",
+            "{:<11}{:>8.3}s  {:>11} entries  {:>10.0} entries/s  {:>7} unreadable  {:>10}{}",
             self.stage,
             seconds,
             self.entries,
             rate,
             self.failed,
             human_size(self.total_size),
+            hard_linked,
         );
     }
 }
@@ -107,6 +115,7 @@ fn finish(
         entries,
         failed,
         total_size: tree.get_total_size(),
+        hard_linked: tree.hard_linked_files(),
     };
     std::mem::forget(tree);
     result
@@ -141,6 +150,7 @@ fn bench_dua(path: &Path, options: ScanOptions, build_tree: bool) -> StageResult
         entries,
         failed,
         total_size,
+        hard_linked: 0,
     }
 }
 
@@ -173,6 +183,7 @@ fn bench_scan(path: &Path, options: ScanOptions, build_tree: bool) -> StageResul
         entries,
         failed,
         total_size,
+        hard_linked: 0,
     }
 }
 

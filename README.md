@@ -8,6 +8,7 @@
 - **Treemap navigation** — proportional tiles for files and folders; zoom for dense directories
 - **In-session cleanup** — delete files or folders and track space freed in the title bar
 - **Apparent or on-disk size** — default shows blocks allocated on disk; `-a` uses logical file size
+- **Hard-link aware** — a file reached by several names counts once in each folder that holds it
 - **Unix-native** — Linux, macOS, and BSD; built on `ratatui` and parallel directory walking
 
 ## Requirements
@@ -15,6 +16,26 @@
 - Linux/MacOS
 - A terminal with reasonable size (roughly 50×15 cells minimum for the main UI)
 - [Rust](https://www.rust-lang.org/tools/install)
+
+## Hard links and folder sizes
+
+A folder's size is the space held under it: each distinct file counted once, however many names
+point at it. If `a/a`, `a/b` and `b/a` are all links to the same 1 KiB file, then `a` is 1 KiB,
+`b` is 1 KiB, and the root holding both is 1 KiB — deleting either folder alone frees nothing, and
+deleting both frees 1 KiB.
+
+This differs from `du`, which deduplicates in traversal order and so charges whichever directory it
+reached first, reporting nothing for the others.
+
+Two things follow that are worth knowing:
+
+- **Sizes do not add up where hard links are involved.** A folder can be smaller than the sum of
+  the tiles inside it — each file tile shows that file's own size, while the folder shows the space
+  it holds.
+- **Deleting one link frees nothing** until the last link is gone, so the "space freed" figure is
+  optimistic in that case. A rescan restores the true picture.
+
+`docs/scan-performance.md` covers the details and the reasoning.
 
 ## Benchmarking the scan
 

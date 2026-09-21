@@ -102,7 +102,9 @@ fn prompt_file_deletion_shows_confirmation() {
             name: OsStr::new("remove_me.txt").to_os_string(),
             meta: libdiskonaut::EntryMeta {
                 size: meta.len(),
+                links: 1,
                 is_dir: false,
+                ..libdiskonaut::EntryMeta::default()
             },
         }],
         failed: 0,

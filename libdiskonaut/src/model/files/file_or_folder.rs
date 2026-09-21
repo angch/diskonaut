@@ -105,22 +105,23 @@ impl Folder {
     }
 
     /// Add every entry of one directory, given that directory's path relative to this folder.
+    ///
+    /// `size_at_depth[k]` is added to the folder `k` levels down, so that a hard-linked file can
+    /// be charged to some ancestors and not others. For a tree without hard links every element
+    /// is the same total. See [`crate::model::HardLinks`].
     pub fn add_dir_entries<'a>(
         &mut self,
         dir_path: impl Iterator<Item = &'a OsStr>,
         entries: &[NamedEntry],
+        size_at_depth: &[u128],
     ) {
-        let contained_size: u128 = entries
-            .iter()
-            .filter(|entry| !entry.meta.is_dir)
-            .map(|entry| u128::from(entry.meta.size))
-            .sum();
         let contained_count = entries.len() as u64;
+        let size_at = |depth: usize| size_at_depth.get(depth).copied().unwrap_or(0);
 
         let mut folder = self;
-        folder.size += contained_size;
+        folder.size += size_at(0);
         folder.num_descendants += contained_count;
-        for name in dir_path {
+        for (depth, name) in dir_path.enumerate() {
             folder = match folder
                 .contents
                 .entry(name.to_os_string())
@@ -129,7 +130,7 @@ impl Folder {
                 FileOrFolder::Folder(folder) => folder,
                 FileOrFolder::File(_) => unreachable!("got a file in the middle of a path"),
             };
-            folder.size += contained_size;
+            folder.size += size_at(depth + 1);
             folder.num_descendants += contained_count;
         }
 
@@ -157,6 +158,7 @@ impl Folder {
             EntryMeta {
                 size: 0,
                 is_dir: true,
+                ..EntryMeta::default()
             },
             path.components().map(|component| component.as_os_str()),
         );
@@ -165,7 +167,9 @@ impl Folder {
         self.add_entry(
             EntryMeta {
                 size: u64::try_from(size).unwrap_or(u64::MAX),
+                links: 1,
                 is_dir: false,
+                ..EntryMeta::default()
             },
             path.components().map(|component| component.as_os_str()),
         );
@@ -181,6 +185,17 @@ impl Folder {
             Some(next_in_path)
         }
     }
+    /// How much an item contributed to each of its ancestors' `num_descendants`.
+    ///
+    /// A folder counts its own contents plus itself: every ancestor was incremented once for the
+    /// folder's entry and once for each entry inside it.
+    fn delete_path_removed_descendants(item: &FileOrFolder) -> u64 {
+        match item {
+            FileOrFolder::Folder(folder) => folder.num_descendants + 1,
+            FileOrFolder::File(_) => 1,
+        }
+    }
+
     pub fn delete_path(&mut self, folder_names: &[OsString]) {
         // TODO: there are some needless allocations here, this is not terrible since
         // the deletion itself takes an order of magnitude longer, but it can be nice
@@ -195,13 +210,13 @@ impl Folder {
                 .get(name)
                 .expect("could not find folder")
                 .size();
-            let removed_descendents = match &self.contents.get(name).expect("could not find folder")
-            {
-                FileOrFolder::Folder(folder) => folder.num_descendants,
-                FileOrFolder::File(_file) => 1,
-            };
-            self.size -= removed_size;
-            self.num_descendants -= removed_descendents;
+            let removed_descendents = Self::delete_path_removed_descendants(
+                self.contents.get(name).expect("could not find folder"),
+            );
+            // Saturating because a hard-linked file's size was charged to this folder only once
+            // however many links it has here, so removing each link would otherwise underflow.
+            self.size = self.size.saturating_sub(*removed_size);
+            self.num_descendants = self.num_descendants.saturating_sub(removed_descendents);
             self.contents.remove(name);
         } else {
             let (removed_size, removed_descendents) = {
@@ -209,11 +224,7 @@ impl Folder {
                     .path(Vec::from(folders_to_traverse.clone()))
                     .expect("could not find item to delete");
                 let removed_size = item_to_remove.size();
-                let removed_descendents = match item_to_remove {
-                    FileOrFolder::Folder(folder) => folder.num_descendants,
-                    FileOrFolder::File(_file) => 1,
-                };
-                (removed_size, removed_descendents)
+                (removed_size, Self::delete_path_removed_descendants(item_to_remove))
             };
             let next_name = folders_to_traverse
                 .pop_front()
@@ -224,8 +235,9 @@ impl Folder {
                 .expect("could not find folder in path");
             match next_item {
                 FileOrFolder::Folder(folder) => {
-                    self.size -= removed_size;
-                    self.num_descendants -= removed_descendents;
+                    self.size = self.size.saturating_sub(removed_size);
+                    self.num_descendants =
+                        self.num_descendants.saturating_sub(removed_descendents);
                     folder.delete_path(&Vec::from(folders_to_traverse));
                 }
                 FileOrFolder::File(_) => {

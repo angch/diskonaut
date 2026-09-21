@@ -41,11 +41,24 @@ impl Default for ScanOptions {
 /// Keeping this small matters: one of these is produced for every file on the volume and handed
 /// across a channel to the tree builder, so the platform `Metadata` (which is an order of
 /// magnitude larger) never travels with it.
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
 pub struct EntryMeta {
     /// Size already resolved according to [`ScanOptions::show_apparent_size`].
     pub size: u64,
+    /// Filesystem identity, used to charge a hard-linked file to a folder only once.
+    pub inode: u64,
+    /// Directory entries pointing at this file; `1` for an ordinary file.
+    pub links: u64,
     pub is_dir: bool,
+}
+
+impl EntryMeta {
+    /// Whether more than one directory entry points at this file, so that the same blocks can be
+    /// reached by more than one path and must not be counted twice within a folder.
+    #[must_use]
+    pub fn is_hardlinked(&self) -> bool {
+        !self.is_dir && self.links > 1
+    }
 }
 
 /// An entry named relative to the directory that contains it.
@@ -90,8 +103,8 @@ pub fn scan_directories(root: &Path, options: ScanOptions) -> impl Iterator<Item
 #[cfg_attr(target_os = "macos", allow(dead_code))]
 mod fallback {
     use super::{
-        DirEntries, EntryMeta, NamedEntry, Options, Order, ScanOptions, entry_size, thread_count,
-        walk,
+        DirEntries, EntryMeta, NamedEntry, Options, Order, ScanOptions, entry_identity, entry_size,
+        thread_count, walk,
     };
     use ::std::path::Path;
     use ::std::sync::Arc;
@@ -156,12 +169,17 @@ mod fallback {
                     // It is not an entry inside the tree being scanned.
                     continue;
                 }
-                let named = metadata.ok().map(|metadata| NamedEntry {
-                    name: file_name,
-                    meta: EntryMeta {
-                        size: entry_size(&metadata, apparent),
-                        is_dir: file_type.is_dir(),
-                    },
+                let named = metadata.ok().map(|metadata| {
+                    let (inode, links) = entry_identity(&metadata);
+                    NamedEntry {
+                        name: file_name,
+                        meta: EntryMeta {
+                            size: entry_size(&metadata, apparent),
+                            inode,
+                            links,
+                            is_dir: file_type.is_dir(),
+                        },
+                    }
                 });
 
                 match &mut open {
@@ -231,18 +249,35 @@ pub fn scan_folder(root: impl AsRef<Path>, options: ScanOptions) -> impl Iterato
         Ok(entry) => {
             let path = entry.path();
             match entry.metadata {
-                Ok(metadata) => ScanItem::Entry {
-                    path,
-                    meta: EntryMeta {
-                        size: entry_size(&metadata, apparent),
-                        is_dir: entry.file_type.is_dir(),
-                    },
-                },
+                Ok(metadata) => {
+                    let (inode, links) = entry_identity(&metadata);
+                    ScanItem::Entry {
+                        path,
+                        meta: EntryMeta {
+                            size: entry_size(&metadata, apparent),
+                            inode,
+                            links,
+                            is_dir: entry.file_type.is_dir(),
+                        },
+                    }
+                }
                 Err(_) => ScanItem::ReadError,
             }
         }
         Err(_) => ScanItem::ReadError,
     })
+}
+
+/// Inode number and link count, however the platform's metadata spells them.
+#[cfg(target_os = "macos")]
+fn entry_identity(metadata: &::dua_core::Metadata) -> (u64, u64) {
+    (metadata.ino(), metadata.nlink())
+}
+
+#[cfg(not(target_os = "macos"))]
+fn entry_identity(metadata: &::dua_core::Metadata) -> (u64, u64) {
+    use ::std::os::unix::fs::MetadataExt;
+    (metadata.ino(), metadata.nlink())
 }
 
 #[cfg(target_os = "macos")]

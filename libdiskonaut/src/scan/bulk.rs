@@ -79,12 +79,17 @@ fn requested_attributes(apparent_size: bool) -> libc::attrlist {
             | libc::ATTR_CMN_FILEID,
         volattr: 0,
         dirattr: 0,
-        fileattr: if apparent_size {
-            libc::ATTR_FILE_DATALENGTH
-        } else {
-            libc::ATTR_FILE_ALLOCSIZE
-        },
+        fileattr: libc::ATTR_FILE_LINKCOUNT | size_attribute(apparent_size),
         forkattr: 0,
+    }
+}
+
+/// Which size the scan asks for; the other one is not requested at all.
+fn size_attribute(apparent_size: bool) -> libc::attrgroup_t {
+    if apparent_size {
+        libc::ATTR_FILE_DATALENGTH
+    } else {
+        libc::ATTR_FILE_ALLOCSIZE
     }
 }
 
@@ -141,6 +146,12 @@ fn parse_record(record: &[u8], size_attribute: libc::attrgroup_t) -> Option<Pars
     let flags = cursor.u32()?;
     let inode = cursor.u64()?;
     // A directory's record stops here: file attributes are absent rather than zero-filled.
+    // Within the file group the link count precedes the size, in ascending bit order.
+    let links = if returned_file & libc::ATTR_FILE_LINKCOUNT != 0 {
+        u64::from(cursor.u32()?)
+    } else {
+        1
+    };
     let size = if returned_file & size_attribute != 0 {
         cursor.u64()?
     } else {
@@ -165,6 +176,8 @@ fn parse_record(record: &[u8], size_attribute: libc::attrgroup_t) -> Option<Pars
             name: OsString::from_vec(name.to_vec()),
             meta: EntryMeta {
                 size,
+                inode,
+                links,
                 is_dir: object_type == VDIR,
             },
         },
@@ -213,7 +226,7 @@ fn read_dir_bulk(
         unsafe { status.assume_init() }.st_ino
     };
 
-    let size_attribute = requested_attributes(apparent_size).fileattr;
+    let size_attribute = size_attribute(apparent_size);
     let mut entries = Vec::new();
     let mut listed = Vec::new();
     let mut failed = 0u64;
@@ -315,6 +328,8 @@ fn read_dir_stat(path: &Path, apparent_size: bool, inode: u64) -> io::Result<Dir
             name: entry.file_name(),
             meta: EntryMeta {
                 size: if metadata.is_dir() { 0 } else { size },
+                inode: metadata.ino(),
+                links: metadata.nlink(),
                 is_dir: metadata.is_dir(),
             },
         });

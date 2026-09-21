@@ -1,7 +1,7 @@
 use ::std::ffi::{OsStr, OsString};
 use ::std::path::{Component, Path, PathBuf};
 
-use crate::model::{FileOrFolder, FileToDelete, Folder};
+use crate::model::{FileOrFolder, FileToDelete, Folder, HardLinks};
 use crate::scan::{EntryMeta, NamedEntry};
 
 pub struct FileTree {
@@ -10,6 +10,11 @@ pub struct FileTree {
     pub failed_to_read: u64,
     pub path_in_filesystem: PathBuf,
     base_folder: Folder,
+    hard_links: HardLinks,
+    /// Reused between calls: how much size to add at each depth from the base folder down.
+    size_at_depth: Vec<u128>,
+    /// Reused between calls by [`FileTree::add_entry`].
+    single_entry: Vec<NamedEntry>,
 }
 
 impl FileTree {
@@ -20,6 +25,9 @@ impl FileTree {
             path_in_filesystem,
             space_freed: 0,
             failed_to_read: 0,
+            hard_links: HardLinks::default(),
+            size_at_depth: Vec::new(),
+            single_entry: Vec::new(),
         }
     }
     pub fn get_total_size(&self) -> u128 {
@@ -66,6 +74,10 @@ impl FileTree {
         let path_to_delete = &file_to_delete.path_to_file;
         self.base_folder.delete_path(path_to_delete);
     }
+    /// How many distinct hard-linked files the scan has seen.
+    pub fn hard_linked_files(&self) -> usize {
+        self.hard_links.tracked()
+    }
     /// Add every entry of one directory at once.
     ///
     /// Resolving `dir_path` is O(depth), and doing it once for the whole directory rather than
@@ -76,14 +88,64 @@ impl FileTree {
         let Ok(relative) = dir_path.strip_prefix(&self.path_in_filesystem) else {
             return;
         };
-        self.base_folder
-            .add_dir_entries(relative.components().map(Component::as_os_str), entries);
+        self.add_relative_dir_entries(relative, entries);
     }
     pub fn add_entry(&mut self, meta: EntryMeta, entry_full_path: &Path) {
         let Ok(relative) = entry_full_path.strip_prefix(&self.path_in_filesystem) else {
             return;
         };
-        self.base_folder
-            .add_entry(meta, relative.components().map(Component::as_os_str));
+        let (Some(name), Some(parent)) = (relative.file_name(), relative.parent()) else {
+            // The scan root itself, which is not an entry inside the tree.
+            return;
+        };
+        // Taken out of `self` so the shared path below can borrow the rest of it.
+        let mut single = std::mem::take(&mut self.single_entry);
+        single.clear();
+        single.push(NamedEntry {
+            name: name.to_os_string(),
+            meta,
+        });
+        self.add_relative_dir_entries(parent, &single);
+        self.single_entry = single;
+    }
+    /// Add one directory's entries, given that directory's path relative to the scan root.
+    ///
+    /// A hard-linked file is charged only to the folders that have not already counted it, which
+    /// is what makes each folder's size the space actually held beneath it rather than the sum of
+    /// its entries. See [`HardLinks`].
+    fn add_relative_dir_entries(&mut self, relative_dir: &Path, entries: &[NamedEntry]) {
+        let depth = relative_dir.components().count();
+        let Self {
+            base_folder,
+            hard_links,
+            size_at_depth,
+            ..
+        } = self;
+
+        size_at_depth.clear();
+        size_at_depth.resize(depth + 1, 0);
+        for entry in entries {
+            if entry.meta.is_dir {
+                continue;
+            }
+            let size = u128::from(entry.meta.size);
+            let charged_down_to = if entry.meta.is_hardlinked() {
+                hard_links.charge(entry.meta.inode, entry.meta.size, relative_dir)
+            } else {
+                None
+            };
+            // Folders above and including the deepest one already charged keep their totals; the
+            // ones below it are seeing this file for the first time.
+            let first_uncharged = charged_down_to.map_or(0, |charged| charged + 1);
+            for folder_size in &mut size_at_depth[first_uncharged.min(depth + 1)..] {
+                *folder_size += size;
+            }
+        }
+
+        base_folder.add_dir_entries(
+            relative_dir.components().map(Component::as_os_str),
+            entries,
+            size_at_depth,
+        );
     }
 }

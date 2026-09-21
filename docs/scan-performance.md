@@ -266,10 +266,65 @@ totals are unchanged.
 
 Two audit findings were deliberately left alone, both pre-existing:
 
-- `Folder::delete_path` under-counts `num_descendants` by one per deleted folder, because adding a
-  folder contributes `num_descendants + 1` and deleting subtracts `num_descendants`. Sizes are
-  exact. Not introduced or worsened here.
-- Hardlinked files are counted once per link, where `du` deduplicates by `(st_dev, st_ino)`.
+Both have since been dealt with: `delete_path` now subtracts the folder itself along with its
+contents, and hard links are counted once per folder (see above).
+
+## What a folder's size means, and hard links
+
+A folder's size answers **"how much space is held under here"**: every distinct file beneath it,
+counted once. Hard links make that different from "the sum of the entries", because one file can
+be reached by several names.
+
+The rule is per folder. A file counts once in any folder that can reach it, and once in any folder
+above that — but never twice in the same folder. With `a/a`, `a/b` and `b/a` all links to the same
+1 KiB file:
+
+```
+root   1 KiB     one file, however many names point at it
+├── a  1 KiB     a/a and a/b are the same blocks
+└── b  1 KiB     b/a is those same blocks, held here too
+```
+
+Deleting `a` on its own frees nothing, and neither does deleting `b`; deleting both frees 1 KiB.
+That is a real property of hard links, not an artefact of the accounting.
+
+`du` answers a different question. It deduplicates across the whole run in traversal order, so the
+first directory it happens to visit is charged and the rest show nothing:
+
+```
+$ du -sk a b .
+4    a
+0    b        <- not "b holds nothing", just "b was visited second"
+4    .
+```
+
+Which directory gets the 4 KiB depends on the order of the walk. diskonaut's answer does not: the
+tests cover both orderings, and `HardLinks::charge` is deliberately order-independent.
+
+### The gotchas
+
+**Sizes are not additive.** A folder's size can be less than the sum of its children's sizes, and
+the file tiles inside a folder can add up to more than the folder they sit in. In the example
+above `a` is 1 KiB while the two files inside it each show 1 KiB. Both numbers are correct answers
+to different questions — the tile shows how big that file is, the folder shows how much space it
+holds — but they will not reconcile by addition wherever hard links are involved.
+
+**Deleting one link frees nothing.** Space comes back only when the last link goes. diskonaut
+subtracts the file's full size from its ancestors on delete, so after removing one of several
+links the "space freed" figure and the folder sizes are optimistic until the last one is gone. The
+subtraction saturates at zero so the tree cannot go negative, and a rescan always restores the
+truth.
+
+**Identity is the inode number plus the size.** Inode numbers are unique only within a filesystem,
+and a scan of `/` on macOS spans a volume group whose volumes number their inodes independently.
+Two entries claiming one inode but different sizes are therefore treated as different files. Two
+genuinely different same-size files that collide on an inode number across volumes would be
+merged; that needs both to be hard-linked as well, which makes it unlikely rather than impossible.
+
+**Only files with more than one link are tracked.** Everything else takes the plain additive path,
+which is what keeps the cost invisible: a whole-disk scan here found 19,283 distinct hard-linked
+files out of 10.4M entries, so the ledger is negligible and the measured scan time did not move.
+It did move the total, by about 16 GiB — that much of the disk was being counted twice.
 
 ## What is macOS-specific
 
@@ -367,9 +422,10 @@ they matter just as much as speed:
   device check will not catch. `/proc/self/mountinfo` enumerates them.
 - **btrfs subvolumes** report differing `st_dev` values within one filesystem, so a naive
   device check will *under*-count by refusing to descend. Check against `mountinfo`.
-- **Hardlinks** are counted once per link today, on every platform. `du` deduplicates by
-  `(st_dev, st_ino)`. This is a pre-existing gap, not a regression, but it is more visible on a
-  whole-disk scan.
+- **Hard links** are handled by `HardLinks` in the shared model, keyed on the inode number and
+  size reported by the walk, so a Linux walker gets the behaviour for free as long as it fills in
+  `EntryMeta::inode` and `EntryMeta::links`. `statx` supplies both (`stx_ino`, `stx_nlink`), and
+  `getdents64` alone does not — another reason a size-bearing stat is unavoidable there.
 - **Symlinks** are not followed, and should stay that way.
 
 ### Where to put the code
@@ -387,7 +443,6 @@ walkers can be compared on the same tree in one run, which is what made the macO
   definition of "the disk" is a product decision, not a settled one.
 - ~470 entries under `/` are unreadable without Full Disk Access. Granting it to the terminal will
   change the total.
-- Hardlinked files are counted once per link (see above).
 - Peak RSS for a whole-disk scan is ~3.5 GB, roughly 340 bytes per entry. `Folder` stores a
   `HashMap<OsString, FileOrFolder>` per directory and every `File` pays the size of the larger
   `Folder` variant. An arena or an interned-name representation would cut this substantially, and
