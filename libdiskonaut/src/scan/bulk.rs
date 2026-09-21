@@ -15,8 +15,9 @@ use ::std::os::fd::{AsRawFd, OwnedFd};
 use ::std::os::unix::ffi::OsStringExt;
 use ::std::os::unix::fs::OpenOptionsExt;
 use ::std::path::{Path, PathBuf};
+use ::std::sync::atomic::{AtomicBool, Ordering};
 use ::std::sync::mpsc::{Receiver, SyncSender, sync_channel};
-use ::std::sync::{Arc, Condvar, Mutex};
+use ::std::sync::{Arc, Condvar, Mutex, PoisonError};
 use ::std::thread;
 
 use crate::scan::{DirEntries, EntryMeta, NamedEntry};
@@ -87,6 +88,26 @@ fn requested_attributes(apparent_size: bool) -> libc::attrlist {
     }
 }
 
+/// Attributes every record must carry for the fixed-layout parse above to be valid.
+///
+/// APFS returns all of them. A filesystem that does not (some network and foreign filesystems may
+/// not vend `ATTR_CMN_FILEID`, for instance) would shift every following field, and a garbage
+/// inode would make whole subtrees look like mount points and vanish. Detecting that and falling
+/// back is much safer than parsing a layout we did not get.
+const REQUIRED_COMMON: libc::attrgroup_t = libc::ATTR_CMN_RETURNED_ATTRS
+    | ATTR_CMN_ERROR
+    | libc::ATTR_CMN_NAME
+    | libc::ATTR_CMN_OBJTYPE
+    | libc::ATTR_CMN_FLAGS
+    | libc::ATTR_CMN_FILEID;
+
+/// The set of common attributes a record says it carries, without decoding the rest of it.
+fn record_common_attributes(record: &[u8]) -> Option<libc::attrgroup_t> {
+    let mut cursor = Cursor { bytes: record };
+    let _length = cursor.u32()?;
+    cursor.u32()
+}
+
 /// A decoded record: the entry itself, plus what the listing said about where it leads.
 struct ParsedRecord {
     entry: BulkEntry,
@@ -106,7 +127,7 @@ fn parse_record(record: &[u8], size_attribute: libc::attrgroup_t) -> Option<Pars
     let _directory = cursor.u32()?;
     let returned_file = cursor.u32()?;
     let _fork = cursor.u32()?;
-    if returned_common & libc::ATTR_CMN_RETURNED_ATTRS == 0 {
+    if returned_common & REQUIRED_COMMON != REQUIRED_COMMON {
         return None;
     }
 
@@ -220,16 +241,25 @@ fn read_dir_bulk(
             return Err(error);
         }
 
+        let count = count as usize;
         let mut offset = 0usize;
-        for _ in 0..count {
+        for index in 0..count {
             let Some(length) = buffer.0[offset..]
                 .split_first_chunk::<4>()
                 .map(|(length, _)| u32::from_ne_bytes(*length) as usize)
                 .filter(|length| *length >= 4 && offset + *length <= buffer.0.len())
             else {
-                failed += 1;
+                // The rest of the batch cannot be located without this record's length.
+                failed += (count - index) as u64;
                 break;
             };
+            if index == 0
+                && entries.is_empty()
+                && record_common_attributes(&buffer.0[offset..offset + length])
+                    .is_none_or(|returned| returned & REQUIRED_COMMON != REQUIRED_COMMON)
+            {
+                return read_dir_stat(path, apparent_size, inode);
+            }
             match parse_record(&buffer.0[offset..offset + length], size_attribute) {
                 Some(record) => {
                     entries.push(record.entry);
@@ -242,6 +272,56 @@ fn read_dir_bulk(
             }
             offset += length;
         }
+    }
+
+    Ok(DirRead {
+        entries: DirEntries {
+            path: Arc::from(path),
+            entries,
+            failed,
+        },
+        inode,
+        listed,
+    })
+}
+
+/// Enumerate one directory with `readdir` and `lstat`, for filesystems whose bulk records do not
+/// carry the attributes [`parse_record`] relies on.
+///
+/// `lstat` resolves through a mount point, so the inodes recorded here cannot distinguish a
+/// mounted directory from the directory it covers. Nothing reachable this way has firmlinks, and
+/// nested mounts on such volumes are unusual, so the walk simply descends.
+fn read_dir_stat(path: &Path, apparent_size: bool, inode: u64) -> io::Result<DirRead> {
+    use ::std::os::unix::fs::MetadataExt;
+
+    let mut entries = Vec::new();
+    let mut listed = Vec::new();
+    let mut failed = 0u64;
+    for entry in ::std::fs::read_dir(path)? {
+        // `DirEntry::metadata` does not follow symlinks, matching the bulk path.
+        let Ok((entry, metadata)) = entry.and_then(|entry| {
+            let metadata = entry.metadata()?;
+            Ok((entry, metadata))
+        }) else {
+            failed += 1;
+            continue;
+        };
+        let size = if apparent_size {
+            metadata.len()
+        } else {
+            crate::os::size_on_disk_fast(&metadata)
+        };
+        entries.push(BulkEntry {
+            name: entry.file_name(),
+            meta: EntryMeta {
+                size: if metadata.is_dir() { 0 } else { size },
+                is_dir: metadata.is_dir(),
+            },
+        });
+        listed.push(ListedAs {
+            firmlink: false,
+            inode: metadata.ino(),
+        });
     }
 
     Ok(DirRead {
@@ -269,6 +349,8 @@ struct Job {
 struct Queue {
     state: Mutex<QueueState>,
     wakeup: Condvar,
+    /// Set when the consumer has gone away and the remaining work no longer matters.
+    stop: AtomicBool,
 }
 
 struct QueueState {
@@ -283,15 +365,29 @@ impl Queue {
         if jobs.is_empty() {
             return;
         }
-        let mut state = self.state.lock().expect("scan queue poisoned");
+        let mut state = self.state.lock().unwrap_or_else(PoisonError::into_inner);
         state.pending.extend(jobs);
         self.wakeup.notify_all();
     }
 
-    /// Claim the next directory, or `None` once no work remains anywhere in the pool.
+    /// Abandon the rest of the walk and wake every worker waiting for more of it.
+    ///
+    /// Without this, dropping a walk early would leave the workers to finish the whole tree while
+    /// the consumer waited to join them — on a whole disk, half a minute of scanning nobody wants.
+    fn request_stop(&self) {
+        // Taken so that a worker cannot be between checking the flag and waiting on the condvar.
+        let _state = self.state.lock().unwrap_or_else(PoisonError::into_inner);
+        self.stop.store(true, Ordering::Release);
+        self.wakeup.notify_all();
+    }
+
+    /// Claim the next directory, or `None` once the walk is over or abandoned.
     fn pop(&self) -> Option<Job> {
-        let mut state = self.state.lock().expect("scan queue poisoned");
+        let mut state = self.state.lock().unwrap_or_else(PoisonError::into_inner);
         loop {
+            if self.stop.load(Ordering::Acquire) {
+                return None;
+            }
             if let Some(job) = state.pending.pop() {
                 state.working += 1;
                 return Some(job);
@@ -301,12 +397,12 @@ impl Queue {
                 self.wakeup.notify_all();
                 return None;
             }
-            state = self.wakeup.wait(state).expect("scan queue poisoned");
+            state = self.wakeup.wait(state).unwrap_or_else(PoisonError::into_inner);
         }
     }
 
     fn finish(&self) {
-        let mut state = self.state.lock().expect("scan queue poisoned");
+        let mut state = self.state.lock().unwrap_or_else(PoisonError::into_inner);
         state.working -= 1;
         if state.working == 0 && state.pending.is_empty() {
             self.wakeup.notify_all();
@@ -340,6 +436,7 @@ pub fn walk_bulk(
             working: 0,
         }),
         wakeup: Condvar::new(),
+        stop: AtomicBool::new(false),
     });
     let (sender, receiver): (SyncSender<DirEntries>, Receiver<DirEntries>) =
         sync_channel(threads * 4);
@@ -353,6 +450,13 @@ pub fn walk_bulk(
                 .spawn(move || {
                     let mut buffer = AlignedBuffer([0; BUFFER_BYTES]);
                     while let Some(job) = queue.pop() {
+                        // `dua-core` descends into a directory entry whose own depth is below the
+                        // limit; a job's depth is that same depth, so the test matches it. Only
+                        // the root can reach here, since children are filtered before queueing.
+                        if max_depth.is_some_and(|max| job.depth >= max) {
+                            queue.finish();
+                            continue;
+                        }
                         let stop;
                         match read_dir_bulk(&job.path, apparent_size, &mut buffer) {
                             Ok(read) => {
@@ -362,7 +466,7 @@ pub fn walk_bulk(
                                     queue.finish();
                                     continue;
                                 }
-                                let children = if max_depth.is_none_or(|max| job.depth < max) {
+                                let children = if max_depth.is_none_or(|max| job.depth + 1 < max) {
                                     read.entries
                                         .entries
                                         .iter()
@@ -407,12 +511,14 @@ pub fn walk_bulk(
     BulkWalk {
         receiver,
         workers: Some(workers),
+        queue,
     }
 }
 
 struct BulkWalk {
     receiver: Receiver<DirEntries>,
     workers: Option<Vec<thread::JoinHandle<()>>>,
+    queue: Arc<Queue>,
 }
 
 impl Iterator for BulkWalk {
@@ -438,7 +544,9 @@ impl BulkWalk {
 
 impl Drop for BulkWalk {
     fn drop(&mut self) {
-        // Draining lets any worker blocked on a full channel finish and notice the walk is over.
+        self.queue.request_stop();
+        // Draining releases any worker blocked sending into a full channel, so it can reach the
+        // top of its loop and see that the walk has been abandoned.
         while self.receiver.recv().is_ok() {}
         self.join();
     }

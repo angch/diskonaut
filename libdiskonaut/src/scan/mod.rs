@@ -98,67 +98,89 @@ mod fallback {
 
     /// Collect the `dua-core` walk into per-directory groups.
     ///
-    /// `Order::Completion` emits a directory's entries consecutively, so grouping consecutive
-    /// entries that share a parent recovers whole directories without buffering the whole walk.
+    /// `Order::Completion` reports a directory's entries together, so accumulating entries that
+    /// share a parent recovers whole directories without buffering the whole walk. A directory
+    /// whose entries arrive in several chunks simply yields several groups, which the tree builder
+    /// handles: each group carries only its own entries' sizes and counts.
     pub fn group_by_directory(
         root: &Path,
         options: ScanOptions,
     ) -> impl Iterator<Item = DirEntries> {
         let apparent = options.show_apparent_size;
         let max_depth = options.max_depth;
+        let root: Arc<Path> = Arc::from(root);
         let mut walk = walk(
-            root,
+            &root,
             thread_count(options),
             Order::Completion,
             Options::default(),
             move |entry| max_depth.is_none_or(|max| entry.depth < max),
         );
 
+        // Held across calls: the group being accumulated is only yielded once an entry for a
+        // different directory shows up, or the walk ends.
+        let mut open: Option<DirEntries> = None;
+
         std::iter::from_fn(move || {
-            let mut group: Option<DirEntries> = None;
             loop {
                 let Some(entry) = walk.next() else {
-                    return group;
+                    return open.take();
                 };
-                let Ok(entry) = entry else {
-                    match &mut group {
-                        Some(group) => group.failed += 1,
-                        None => {
-                            return Some(DirEntries {
-                                path: Arc::from(root),
-                                entries: Vec::new(),
-                                failed: 1,
-                            });
+                let entry = match entry {
+                    Ok(entry) => entry,
+                    Err(_) => {
+                        // No entry, so nothing identifies which directory this belongs to.
+                        match &mut open {
+                            Some(open) => open.failed += 1,
+                            None => {
+                                return Some(DirEntries {
+                                    path: Arc::clone(&root),
+                                    entries: Vec::new(),
+                                    failed: 1,
+                                });
+                            }
                         }
+                        continue;
                     }
-                    continue;
                 };
-                let Ok(metadata) = &entry.metadata else {
+                let ::dua_core::Entry {
+                    depth,
+                    file_name,
+                    file_type,
+                    metadata,
+                    parent_path,
+                    ..
+                } = entry;
+                if depth == 0 {
+                    // The walk root itself, reported with the root's *parent* as its parent path.
+                    // It is not an entry inside the tree being scanned.
                     continue;
-                };
-                let named = NamedEntry {
-                    name: entry.file_name,
+                }
+                let named = metadata.ok().map(|metadata| NamedEntry {
+                    name: file_name,
                     meta: EntryMeta {
-                        size: entry_size(metadata, apparent),
-                        is_dir: entry.file_type.is_dir(),
+                        size: entry_size(&metadata, apparent),
+                        is_dir: file_type.is_dir(),
                     },
-                };
-                match &mut group {
-                    Some(open) if open.path == entry.parent_path => open.entries.push(named),
-                    Some(_) => {
-                        let finished = group.replace(DirEntries {
-                            path: entry.parent_path,
-                            entries: vec![named],
-                            failed: 0,
+                });
+
+                match &mut open {
+                    Some(open) if open.path == parent_path => match named {
+                        Some(named) => open.entries.push(named),
+                        None => open.failed += 1,
+                    },
+                    // A different directory: start its group, and hand back the finished one.
+                    // The new group already holds this entry, so nothing is lost by returning.
+                    _ => {
+                        let failed = u64::from(named.is_none());
+                        let finished = open.replace(DirEntries {
+                            path: parent_path,
+                            entries: named.into_iter().collect(),
+                            failed,
                         });
-                        return finished;
-                    }
-                    None => {
-                        group = Some(DirEntries {
-                            path: entry.parent_path,
-                            entries: vec![named],
-                            failed: 0,
-                        });
+                        if finished.is_some() {
+                            return finished;
+                        }
                     }
                 }
             }

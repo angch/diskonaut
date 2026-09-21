@@ -1,5 +1,5 @@
 use ::std::ffi::{OsStr, OsString};
-use ::std::path::{Path, PathBuf};
+use ::std::path::{Component, Path, PathBuf};
 
 use crate::model::{FileOrFolder, FileToDelete, Folder};
 use crate::scan::{EntryMeta, NamedEntry};
@@ -10,9 +10,6 @@ pub struct FileTree {
     pub failed_to_read: u64,
     pub path_in_filesystem: PathBuf,
     base_folder: Folder,
-    /// Component count of `path_in_filesystem`, cached so that every entry added during a scan
-    /// does not re-walk the root path to find where its relative part begins.
-    base_component_count: usize,
 }
 
 impl FileTree {
@@ -20,7 +17,6 @@ impl FileTree {
         FileTree {
             base_folder,
             current_folder_names: Vec::new(),
-            base_component_count: path_in_filesystem.components().count(),
             path_in_filesystem,
             space_freed: 0,
             failed_to_read: 0,
@@ -75,17 +71,19 @@ impl FileTree {
     /// Resolving `dir_path` is O(depth), and doing it once for the whole directory rather than
     /// once per entry is what keeps tree building off the critical path of a fast walk.
     pub fn add_dir_entries(&mut self, dir_path: &Path, entries: &[NamedEntry]) {
-        let relative = dir_path
-            .components()
-            .skip(self.base_component_count)
-            .map(|component| component.as_os_str());
-        self.base_folder.add_dir_entries(relative, entries);
+        // A directory from outside the scanned tree has no place in it. Silently folding such a
+        // path into the base folder, as skipping a component count would, invents entries.
+        let Ok(relative) = dir_path.strip_prefix(&self.path_in_filesystem) else {
+            return;
+        };
+        self.base_folder
+            .add_dir_entries(relative.components().map(Component::as_os_str), entries);
     }
     pub fn add_entry(&mut self, meta: EntryMeta, entry_full_path: &Path) {
-        let relative = entry_full_path
-            .components()
-            .skip(self.base_component_count)
-            .map(|component| component.as_os_str());
-        self.base_folder.add_entry(meta, relative);
+        let Ok(relative) = entry_full_path.strip_prefix(&self.path_in_filesystem) else {
+            return;
+        };
+        self.base_folder
+            .add_entry(meta, relative.components().map(Component::as_os_str));
     }
 }

@@ -164,7 +164,7 @@ impl Folder {
     pub fn add_file(&mut self, path: PathBuf, size: u128) {
         self.add_entry(
             EntryMeta {
-                size: size as u64,
+                size: u64::try_from(size).unwrap_or(u64::MAX),
                 is_dir: false,
             },
             path.components().map(|component| component.as_os_str()),

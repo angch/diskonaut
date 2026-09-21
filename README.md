@@ -41,9 +41,17 @@ count, `--bench-repeat N` repeats each stage, `--single-thread` forces one worke
 
 On macOS the scan uses `getattrlistbulk(2)` directly, requesting only the name, type, flags, inode,
 and one size field per entry — the general-purpose walker asks for the whole `stat` set and pays an
-extra path lookup per directory. It also declines to enter mount points other than the scan root,
-which is what keeps a scan of `/` from counting almost every file twice: macOS both mounts the data
-volume at `/System/Volumes/Data` and grafts it into `/` through firmlinks.
+extra path lookup per directory.
+
+The scan does not enter mount points other than the scan root, the same restriction `du -x`
+applies. On macOS this is what keeps a scan of `/` from counting almost every file twice, since the
+data volume is both mounted at `/System/Volumes/Data` and grafted into `/` through firmlinks
+(firmlinks are still followed — they are the only route to what they point at). One consequence
+worth knowing: pointing diskonaut at a directory that contains nothing but mount points, such as
+`/Volumes`, reports nothing. Scan the volume itself instead.
+
+`docs/scan-performance.md` has the measurements, the reasoning, and notes for repeating the
+exercise on another platform.
 
 ## Configuration
 

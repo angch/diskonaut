@@ -68,20 +68,16 @@ fn try_main() -> Result<(), Error> {
             source,
         })?;
     let show_apparent_size = opts.apparent_size || diskonaut_config.base.apparent_size;
+    let scan_options = ScanOptions {
+        parallel: !opts.single_thread,
+        threads: opts.threads,
+        show_apparent_size,
+        max_depth: opts.max_depth,
+    };
 
     if opts.benchmark {
         let folder = opts.resolve_folder()?;
-        bench::run(
-            &folder,
-            opts.bench_stage,
-            ScanOptions {
-                parallel: !opts.single_thread,
-                threads: opts.threads,
-                show_apparent_size,
-                max_depth: opts.max_depth,
-            },
-            opts.bench_repeat,
-        );
+        bench::run(&folder, opts.bench_stage, scan_options, opts.bench_repeat);
         return Ok(());
     }
 
@@ -95,7 +91,7 @@ fn try_main() -> Result<(), Error> {
                 terminal_backend,
                 Box::new(terminal_events),
                 folder,
-                show_apparent_size,
+                scan_options,
                 keybinds,
             );
         }
@@ -109,7 +105,7 @@ fn start<B>(
     terminal_backend: B,
     terminal_events: Box<dyn Iterator<Item = BackEvent> + Send>,
     path: PathBuf,
-    show_apparent_size: bool,
+    scan_options: ScanOptions,
     keybinds: config::Keybinds,
 ) where
     B: Backend + Send + 'static,
@@ -189,12 +185,6 @@ fn start<B>(
                 let instruction_sender = instruction_sender.clone();
                 let loaded = loaded.clone();
                 move || {
-                    let scan_options = ScanOptions {
-                        parallel: true,
-                        threads: None,
-                        show_apparent_size,
-                        max_depth: None,
-                    };
                     let mut batch = Vec::new();
                     let mut batched_entries = 0usize;
                     'scanning: for directory in scan_directories(&path, scan_options) {
