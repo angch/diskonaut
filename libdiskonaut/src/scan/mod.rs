@@ -23,6 +23,11 @@ pub struct ScanOptions {
     pub show_apparent_size: bool,
     /// Stop descending below this depth (the root is depth 0). `None` means no limit.
     pub max_depth: Option<usize>,
+    /// Do not cross filesystem boundaries (like `du -x`).
+    ///
+    /// The scan always declines to enter a filesystem it is already walking by another path,
+    /// whatever this is set to, since that would count the same files twice.
+    pub one_file_system: bool,
 }
 
 impl Default for ScanOptions {
@@ -32,6 +37,7 @@ impl Default for ScanOptions {
             threads: None,
             show_apparent_size: false,
             max_depth: None,
+            one_file_system: false,
         }
     }
 }
@@ -91,6 +97,7 @@ pub fn scan_directories(root: &Path, options: ScanOptions) -> impl Iterator<Item
             thread_count(options),
             options.show_apparent_size,
             options.max_depth,
+            options.one_file_system,
         )
     }
     #[cfg(not(target_os = "macos"))]
@@ -103,8 +110,8 @@ pub fn scan_directories(root: &Path, options: ScanOptions) -> impl Iterator<Item
 #[cfg_attr(target_os = "macos", allow(dead_code))]
 mod fallback {
     use super::{
-        DirEntries, EntryMeta, NamedEntry, Options, Order, ScanOptions, entry_identity, entry_size,
-        thread_count, walk,
+        DirEntries, EntryMeta, NamedEntry, Options, Order, ScanOptions, descend_predicate,
+        entry_identity, entry_size, thread_count, walk,
     };
     use ::std::path::Path;
     use ::std::sync::Arc;
@@ -120,14 +127,14 @@ mod fallback {
         options: ScanOptions,
     ) -> impl Iterator<Item = DirEntries> {
         let apparent = options.show_apparent_size;
-        let max_depth = options.max_depth;
         let root: Arc<Path> = Arc::from(root);
+        let descend = descend_predicate(&root, options);
         let mut walk = walk(
             &root,
             thread_count(options),
             Order::Completion,
             Options::default(),
-            move |entry| max_depth.is_none_or(|max| entry.depth < max),
+            descend,
         );
 
         // Held across calls: the group being accumulated is only yielded once an entry for a
@@ -236,14 +243,14 @@ const MAX_SCAN_THREADS: usize = 8;
 pub fn scan_folder(root: impl AsRef<Path>, options: ScanOptions) -> impl Iterator<Item = ScanItem> {
     let threads = thread_count(options);
     let apparent = options.show_apparent_size;
-    let max_depth = options.max_depth;
+    let descend = descend_predicate(root.as_ref(), options);
 
     walk(
         root.as_ref(),
         threads,
         Order::Completion,
         Options::default(),
-        move |entry| max_depth.is_none_or(|max| entry.depth < max),
+        descend,
     )
     .map(move |entry| match entry {
         Ok(entry) => {
@@ -266,6 +273,44 @@ pub fn scan_folder(root: impl AsRef<Path>, options: ScanOptions) -> impl Iterato
         }
         Err(_) => ScanItem::ReadError,
     })
+}
+
+/// Whether the walk should descend into a directory entry.
+///
+/// Unlike the native macOS walker, `dua-core` decides this from the entry as its parent listed it,
+/// which is enough for a device comparison: on platforms using this path a mount point really does
+/// report the mounted filesystem's device.
+fn descend_predicate(
+    root: &Path,
+    options: ScanOptions,
+) -> impl Fn(&::dua_core::Entry) -> bool + Send + Sync + 'static {
+    let max_depth = options.max_depth;
+    let root_device = options.one_file_system.then(|| {
+        ::std::fs::metadata(root)
+            .map(|metadata| ::std::os::unix::fs::MetadataExt::dev(&metadata))
+            .unwrap_or_default()
+    });
+    move |entry| {
+        if !max_depth.is_none_or(|max| entry.depth < max) {
+            return false;
+        }
+        match (root_device, &entry.metadata) {
+            (Some(root_device), Ok(metadata)) => entry_device(metadata) == root_device,
+            _ => true,
+        }
+    }
+}
+
+/// The filesystem an entry lives on, however the platform's metadata spells it.
+#[cfg(target_os = "macos")]
+fn entry_device(metadata: &::dua_core::Metadata) -> u64 {
+    metadata.dev()
+}
+
+#[cfg(not(target_os = "macos"))]
+fn entry_device(metadata: &::dua_core::Metadata) -> u64 {
+    use ::std::os::unix::fs::MetadataExt;
+    metadata.dev()
 }
 
 /// Inode number and link count, however the platform's metadata spells them.

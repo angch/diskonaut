@@ -191,6 +191,8 @@ struct DirRead {
     entries: DirEntries,
     /// Inode of the directory that was actually opened.
     inode: u64,
+    /// Filesystem the opened directory turned out to live on.
+    device: u64,
     /// What the listing said about each entry, parallel to `entries.entries`.
     listed: Vec<ListedAs>,
 }
@@ -216,14 +218,15 @@ fn read_dir_bulk(
     // Bulk records describe entries without crossing mount points, so a directory that something
     // is mounted over is listed with the inode of the directory it covers. Opening it does cross
     // the mount, which is what makes the two distinguishable.
-    let inode = {
+    let (inode, device) = {
         let mut status = std::mem::MaybeUninit::<libc::stat>::uninit();
         // SAFETY: the descriptor is owned and open, and `status` is a writable `stat` allocation.
         if unsafe { libc::fstat(directory.as_raw_fd(), status.as_mut_ptr()) } != 0 {
             return Err(io::Error::last_os_error());
         }
         // SAFETY: `fstat` returning zero means it initialized the structure.
-        unsafe { status.assume_init() }.st_ino
+        let status = unsafe { status.assume_init() };
+        (status.st_ino, status.st_dev as u64)
     };
 
     let size_attribute = size_attribute(apparent_size);
@@ -271,7 +274,7 @@ fn read_dir_bulk(
                 && record_common_attributes(&buffer.0[offset..offset + length])
                     .is_none_or(|returned| returned & REQUIRED_COMMON != REQUIRED_COMMON)
             {
-                return read_dir_stat(path, apparent_size, inode);
+                return read_dir_stat(path, apparent_size, inode, device);
             }
             match parse_record(&buffer.0[offset..offset + length], size_attribute) {
                 Some(record) => {
@@ -294,6 +297,7 @@ fn read_dir_bulk(
             failed,
         },
         inode,
+        device,
         listed,
     })
 }
@@ -304,7 +308,7 @@ fn read_dir_bulk(
 /// `lstat` resolves through a mount point, so the inodes recorded here cannot distinguish a
 /// mounted directory from the directory it covers. Nothing reachable this way has firmlinks, and
 /// nested mounts on such volumes are unusual, so the walk simply descends.
-fn read_dir_stat(path: &Path, apparent_size: bool, inode: u64) -> io::Result<DirRead> {
+fn read_dir_stat(path: &Path, apparent_size: bool, inode: u64, device: u64) -> io::Result<DirRead> {
     use ::std::os::unix::fs::MetadataExt;
 
     let mut entries = Vec::new();
@@ -346,6 +350,7 @@ fn read_dir_stat(path: &Path, apparent_size: bool, inode: u64) -> io::Result<Dir
             failed,
         },
         inode,
+        device,
         listed,
     })
 }
@@ -412,7 +417,10 @@ impl Queue {
                 self.wakeup.notify_all();
                 return None;
             }
-            state = self.wakeup.wait(state).unwrap_or_else(PoisonError::into_inner);
+            state = self
+                .wakeup
+                .wait(state)
+                .unwrap_or_else(PoisonError::into_inner);
         }
     }
 
@@ -438,7 +446,13 @@ pub fn walk_bulk(
     threads: usize,
     apparent_size: bool,
     max_depth: Option<usize>,
+    one_file_system: bool,
 ) -> impl Iterator<Item = DirEntries> {
+    // Which filesystem the scan starts on. A mount point leading back to it is a second route to
+    // files the scan already reaches, rather than somewhere new.
+    let root_device = ::std::fs::metadata(root)
+        .map(|metadata| ::std::os::unix::fs::MetadataExt::dev(&metadata))
+        .unwrap_or_default();
     let queue = Arc::new(Queue {
         state: Mutex::new(QueueState {
             pending: vec![Job {
@@ -475,9 +489,16 @@ pub fn walk_bulk(
                         let stop;
                         match read_dir_bulk(&job.path, apparent_size, &mut buffer) {
                             Ok(read) => {
-                                if read.inode != job.listed_inode && !job.firmlink {
-                                    // Something is mounted here; its contents belong to that
-                                    // volume's own scan.
+                                // A directory whose opened inode differs from the one its parent
+                                // listed has something mounted over it.
+                                let mounted = read.inode != job.listed_inode && !job.firmlink;
+                                // Reaching the starting filesystem again through a mount point
+                                // means those files are already being counted by another path --
+                                // macOS mounts the data volume at `/System/Volumes/Data` and also
+                                // grafts it into `/` with firmlinks -- so descending would count
+                                // everything twice.
+                                let already_counted = read.device == root_device;
+                                if mounted && (one_file_system || already_counted) {
                                     queue.finish();
                                     continue;
                                 }

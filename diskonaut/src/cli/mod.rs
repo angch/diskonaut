@@ -16,6 +16,9 @@ pub struct Opt {
     /// Path to config file (default: `~/.config/diskonaut/config.toml`)
     #[arg(short = 'c', long, value_name = "FILE")]
     pub config: Option<PathBuf>,
+    /// Do not cross filesystem boundaries (like `du -x`)
+    #[arg(short = 'x', long = "one-file-system")]
+    pub one_file_system: bool,
     /// Scan headlessly and report timings instead of starting the UI
     #[arg(long)]
     pub benchmark: bool,

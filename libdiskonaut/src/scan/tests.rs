@@ -2,7 +2,9 @@ use ::std::fs::File;
 use ::std::io::Write;
 use ::std::path::PathBuf;
 
-use super::{EntryMeta, NamedEntry, ScanItem, ScanOptions, scan_directories, scan_folder, scan_into_tree};
+use super::{
+    EntryMeta, NamedEntry, ScanItem, ScanOptions, scan_directories, scan_folder, scan_into_tree,
+};
 
 fn temp_scan_dir(name: &str) -> PathBuf {
     let dir = std::env::temp_dir().join(format!("diskonaut_scan_test_{name}"));
@@ -88,7 +90,14 @@ fn scan_directories_groups_entries_by_directory() {
         .collect();
     named.sort();
 
-    assert_eq!(named, vec![sub.clone(), dir.join("top.txt"), sub.join("inner.txt")].into_iter().collect::<std::collections::BTreeSet<_>>().into_iter().collect::<Vec<_>>());
+    assert_eq!(
+        named,
+        vec![sub.clone(), dir.join("top.txt"), sub.join("inner.txt")]
+            .into_iter()
+            .collect::<std::collections::BTreeSet<_>>()
+            .into_iter()
+            .collect::<Vec<_>>()
+    );
 
     let _ = std::fs::remove_dir_all(&dir);
 }
@@ -146,7 +155,10 @@ fn fixture_tree(name: &str) -> (PathBuf, std::collections::BTreeSet<PathBuf>) {
     (dir, expected)
 }
 
-fn collect_paths(dir: &std::path::Path, options: ScanOptions) -> std::collections::BTreeSet<PathBuf> {
+fn collect_paths(
+    dir: &std::path::Path,
+    options: ScanOptions,
+) -> std::collections::BTreeSet<PathBuf> {
     scan_directories(dir, options)
         .flat_map(|directory| {
             let parent = directory.path.to_path_buf();
@@ -164,11 +176,20 @@ fn scan_directories_reports_every_entry_exactly_once() {
     let mut seen = Vec::new();
     for directory in scan_directories(&dir, ScanOptions::default()) {
         let parent = directory.path.to_path_buf();
-        seen.extend(directory.entries.iter().map(|entry| parent.join(&entry.name)));
+        seen.extend(
+            directory
+                .entries
+                .iter()
+                .map(|entry| parent.join(&entry.name)),
+        );
     }
     let unique: std::collections::BTreeSet<_> = seen.iter().cloned().collect();
     assert_eq!(unique, expected, "wrong set of entries");
-    assert_eq!(seen.len(), unique.len(), "an entry was reported twice: {seen:?}");
+    assert_eq!(
+        seen.len(),
+        unique.len(),
+        "an entry was reported twice: {seen:?}"
+    );
 
     let _ = std::fs::remove_dir_all(&dir);
 }
@@ -180,11 +201,20 @@ fn fallback_grouping_reports_every_entry_exactly_once() {
     let mut seen = Vec::new();
     for directory in super::fallback::group_by_directory(&dir, ScanOptions::default()) {
         let parent = directory.path.to_path_buf();
-        seen.extend(directory.entries.iter().map(|entry| parent.join(&entry.name)));
+        seen.extend(
+            directory
+                .entries
+                .iter()
+                .map(|entry| parent.join(&entry.name)),
+        );
     }
     let unique: std::collections::BTreeSet<_> = seen.iter().cloned().collect();
     assert_eq!(unique, expected, "wrong set of entries");
-    assert_eq!(seen.len(), unique.len(), "an entry was reported twice: {seen:?}");
+    assert_eq!(
+        seen.len(),
+        unique.len(),
+        "an entry was reported twice: {seen:?}"
+    );
 
     let _ = std::fs::remove_dir_all(&dir);
 }
@@ -269,7 +299,11 @@ fn hard_links_count_once_per_folder() {
     };
     let (tree, failed) = scan_into_tree(&dir, options);
     assert_eq!(failed, 0);
-    assert_eq!(tree.hard_linked_files(), 1, "one distinct file, three links");
+    assert_eq!(
+        tree.hard_linked_files(),
+        1,
+        "one distinct file, three links"
+    );
 
     let folder_size = |name: &str| match tree
         .get_current_folder()
@@ -280,7 +314,11 @@ fn hard_links_count_once_per_folder() {
         crate::FileOrFolder::File(_) => panic!("{name} should be a folder"),
     };
 
-    assert_eq!(folder_size("a"), 1024, "a/a and a/b are the same 1 KiB file");
+    assert_eq!(
+        folder_size("a"),
+        1024,
+        "a/a and a/b are the same 1 KiB file"
+    );
     assert_eq!(folder_size("b"), 1024, "b/a is that same file again");
     assert_eq!(
         tree.get_total_size(),
@@ -318,8 +356,10 @@ fn hard_links_count_once_per_folder_when_nested() {
     let (tree, _) = scan_into_tree(&dir, options);
 
     let size_of = |path: &[&str]| {
-        let names: Vec<std::ffi::OsString> =
-            path.iter().map(|part| std::ffi::OsString::from(*part)).collect();
+        let names: Vec<std::ffi::OsString> = path
+            .iter()
+            .map(|part| std::ffi::OsString::from(*part))
+            .collect();
         match tree
             .get_current_folder()
             .path(names)

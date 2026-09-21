@@ -224,7 +224,10 @@ impl Folder {
                     .path(Vec::from(folders_to_traverse.clone()))
                     .expect("could not find item to delete");
                 let removed_size = item_to_remove.size();
-                (removed_size, Self::delete_path_removed_descendants(item_to_remove))
+                (
+                    removed_size,
+                    Self::delete_path_removed_descendants(item_to_remove),
+                )
             };
             let next_name = folders_to_traverse
                 .pop_front()
@@ -236,8 +239,7 @@ impl Folder {
             match next_item {
                 FileOrFolder::Folder(folder) => {
                     self.size = self.size.saturating_sub(removed_size);
-                    self.num_descendants =
-                        self.num_descendants.saturating_sub(removed_descendents);
+                    self.num_descendants = self.num_descendants.saturating_sub(removed_descendents);
                     folder.delete_path(&Vec::from(folders_to_traverse));
                 }
                 FileOrFolder::File(_) => {

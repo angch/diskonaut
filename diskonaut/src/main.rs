@@ -73,6 +73,7 @@ fn try_main() -> Result<(), Error> {
         threads: opts.threads,
         show_apparent_size,
         max_depth: opts.max_depth,
+        one_file_system: opts.one_file_system,
     };
 
     if opts.benchmark {
@@ -127,7 +128,12 @@ fn start<B>(
     // stdin. If `stdin_handler` were already polling stdin for input events, it could steal that
     // reply out from under the query, leaving it blocked until the next real keypress arrived and
     // the screen showing nothing in the meantime.
-    let mut app = App::new(terminal_backend, path.clone(), event_sender, keybinds.clone());
+    let mut app = App::new(
+        terminal_backend,
+        path.clone(),
+        event_sender,
+        keybinds.clone(),
+    );
 
     active_threads.push(
         thread::Builder::new()
