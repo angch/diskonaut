@@ -1,4 +1,3 @@
-use ::std::ffi::OsString;
 use ::std::path::Path;
 
 use crate::model::Folder;
@@ -30,7 +29,7 @@ fn board_produces_tiles_for_folder() {
 
 #[test]
 fn files_in_folder_percentages_sum_to_one() {
-    let mut root = Folder::from(OsString::from("root"));
+    let mut root = Folder::default();
     root.add_file("x".into(), 75);
     root.add_file("y".into(), 25);
 

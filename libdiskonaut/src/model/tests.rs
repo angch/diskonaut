@@ -7,7 +7,7 @@ use crate::model::{FileOrFolder, FileTree, Folder};
 
 #[test]
 fn folder_add_file_updates_size() {
-    let mut folder = Folder::from(OsString::from("root"));
+    let mut folder = Folder::default();
     folder.add_file(PathBuf::from("a.txt"), 100);
     folder.add_file(PathBuf::from("b.txt"), 250);
     assert_eq!(folder.size, 350);
@@ -16,7 +16,7 @@ fn folder_add_file_updates_size() {
 
 #[test]
 fn folder_nested_path() {
-    let mut folder = Folder::from(OsString::from("root"));
+    let mut folder = Folder::default();
     folder.add_file(PathBuf::from("sub/file.txt"), 42);
     assert_eq!(folder.size, 42);
     let sub = folder.path(vec!["sub".into()]).expect("subfolder exists");
@@ -71,7 +71,7 @@ fn file_tree_delete_path() {
 #[test]
 fn deleting_a_folder_removes_the_folder_itself_from_the_count() {
     // Built the way a scan builds it: directories arrive as entries in their own right.
-    let mut root = Folder::from(OsString::from("root"));
+    let mut root = Folder::default();
     root.add_file(PathBuf::from("keep.txt"), 10);
     root.add_folder(PathBuf::from("sub"));
     root.add_file(PathBuf::from("sub/one.txt"), 20);
@@ -94,7 +94,7 @@ fn deleting_a_folder_removes_the_folder_itself_from_the_count() {
 
 #[test]
 fn deleting_a_nested_folder_updates_every_ancestor() {
-    let mut root = Folder::from(OsString::from("root"));
+    let mut root = Folder::default();
     root.add_folder(PathBuf::from("a"));
     root.add_folder(PathBuf::from("a/b"));
     root.add_folder(PathBuf::from("a/b/c"));

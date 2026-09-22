@@ -1,6 +1,5 @@
 use ::std::collections::VecDeque;
 use ::std::ffi::{OsStr, OsString};
-use ::std::os::unix::ffi::OsStrExt;
 use ::std::path::{Path, PathBuf};
 
 use crate::scan::{EntryMeta, NamedEntry};
@@ -37,32 +36,22 @@ pub struct File {
     pub size: u64,
 }
 
-#[derive(Debug, Clone)]
+/// A directory in the tree.
+///
+/// It does not store its own name. The name is the key it is filed under in its parent, so a copy
+/// here would be a second one — and nothing ever read it. On a whole-volume scan that was 385k
+/// `OsString`s allocated to be written once and never looked at.
+#[derive(Debug, Clone, Default)]
 pub struct Folder {
-    pub name: OsString,
     pub contents: ContentsMap,
     pub size: u128,
     pub num_descendants: u64,
 }
-
-impl From<OsString> for Folder {
-    fn from(name: OsString) -> Self {
-        Folder {
-            name,
-            contents: ContentsMap::default(),
-            size: 0,
-            num_descendants: 0,
-        }
-    }
-}
 impl Folder {
-    pub fn new(path: &Path) -> Self {
-        let base_folder_name = path
-            .iter()
-            .next_back()
-            .expect("could not get path base name");
+    /// The scan root's folder. The path is not kept: a folder's name lives in its parent, and the
+    /// root's is held by [`crate::FileTree`].
+    pub fn new(_path: &Path) -> Self {
         Self {
-            name: base_folder_name.to_os_string(),
             contents: ContentsMap::default(),
             size: 0,
             num_descendants: 0,
@@ -83,18 +72,18 @@ impl Folder {
             folder.size += size;
             folder.num_descendants += 1;
             if components.peek().is_some() {
-                folder.contents.insert_if_absent(name, || {
-                    FileOrFolder::Folder(Box::new(Folder::from(name.to_os_string())))
-                });
+                folder
+                    .contents
+                    .insert_if_absent(name, || FileOrFolder::Folder(Box::default()));
                 folder = match folder.contents.get_mut(name) {
                     Some(FileOrFolder::Folder(folder)) => folder,
                     _ => unreachable!("got a file in the middle of a path"),
                 };
             } else if meta.is_dir {
                 // A directory can already exist here if one of its children was reported first.
-                folder.contents.insert_if_absent(name, || {
-                    FileOrFolder::Folder(Box::new(Folder::from(name.to_os_string())))
-                });
+                folder
+                    .contents
+                    .insert_if_absent(name, || FileOrFolder::Folder(Box::default()));
             } else {
                 folder
                     .contents
@@ -122,9 +111,9 @@ impl Folder {
         folder.size += size_at(0);
         folder.num_descendants += contained_count;
         for (depth, name) in dir_path.enumerate() {
-            folder.contents.insert_if_absent(name, || {
-                FileOrFolder::Folder(Box::new(Folder::from(name.to_os_string())))
-            });
+            folder
+                .contents
+                .insert_if_absent(name, || FileOrFolder::Folder(Box::default()));
             folder = match folder.contents.get_mut(name) {
                 Some(FileOrFolder::Folder(next)) => next,
                 _ => unreachable!("got a file in the middle of a path"),
@@ -144,14 +133,9 @@ impl Folder {
             if entry.meta.is_dir {
                 // The directory may already be here if its own contents were read first, which is
                 // the only case that has to look before it writes.
-                let folder_name =
-                    OsStr::from_bytes(folder.contents.names_at(offset, len)).to_os_string();
-                folder.contents.place(
-                    offset,
-                    len,
-                    FileOrFolder::Folder(Box::new(Folder::from(folder_name))),
-                    true,
-                );
+                folder
+                    .contents
+                    .place(offset, len, FileOrFolder::Folder(Box::default()), true);
             } else {
                 folder.contents.place(
                     offset,
