@@ -1385,7 +1385,9 @@ as it was designed to be. Past twelve, `pipeline` stops following `walk` down an
 ~0.72s while `walk` keeps falling to 0.43s. That floor is the model.
 
 **So `pipeline ~= max(walk, ~0.70s)`.** The tree build costs about 0.7s for 4.23M entries (~166ns
-each), the walk costs 0.43s, and the walk is already entirely hidden behind it.
+each), the walk costs 0.43s, and the walk is already entirely hidden behind it. (The 0.43s is the
+`walk` *stage*; the last section of this document takes it apart and finds the walker itself nearer
+0.40s, the rest being the harness. It does not change the conclusion here.)
 
 This also gives a better number for the model than `tree-only` does. That stage reports 0.42-0.48s
 and is the distorted one — its untimed `collect()` leaves the allocator and page cache in a state
@@ -1637,6 +1639,104 @@ Measurements for whoever picks it up, so none of it has to be re-derived:
 | total name content | 129.6 MB |
 | directory fan-out | median 3, mean 11.2, p90 13, p99 120, max 43,009 |
 | tree after the `u64` change | ~0.68s, 654 MB (~155 bytes/entry) |
+
+
+## Can the walk go below 0.43s? (2026-09-22)
+
+It is already below it. The 0.43s this document has been quoting for `walk` was partly the
+benchmark harness, and taking it apart is the whole answer.
+
+### What the walk is made of
+
+Each row adds one thing to the row above, `/data`, default threads:
+
+| | walk |
+| --- | --- |
+| traversal alone — entries discarded without being freed, no reflink probe | **0.336–0.356s** |
+| plus the reflink probe | 0.391–0.410s |
+| plus the harness freeing 4.2M names on the consuming thread | 0.427–0.471s |
+
+So the walker is **~0.40s**, not 0.43s, and without reflink accounting it is ~0.35s. For scale,
+`docs/probes/mtwalk.c` — a C walker that allocates nothing and emits nothing — needs 0.387s for the
+same tree. **The traversal is at the floor and slightly under it.**
+
+The last row is a measurement artifact of the same family as `tree-only`: the `walk` stage frees
+every name on one thread, which the app never does — the tree takes ownership and keeps them. It
+was tempting to `mem::forget` them and re-publish a lower number. Measured, that is a bad trade:
+five runs each gave 0.427/0.471/0.428/0.438/0.464 dropping against 0.400/0.429/0.404/0.418/0.431
+leaking, so it removes about **0.02s — less than the 0.044s spread between runs of the same
+binary** — and costs 434 MB of leaked memory, which would make the stage's RSS meaningless. The
+harness is left alone and the artifact is written down here instead.
+
+**Treat anything under ~0.04s in this section as noise.** Several of the effects below are near
+that line.
+
+### Where the remaining kernel work goes
+
+The walk is 89% kernel: 0.98s user against 8.10s system. At ~22 effective cores out of 24 threads
+the parallel efficiency is already high, and more threads make it worse. Syscall counts, from
+`strace -c` on a subtree of 27,884 entries in 3,539 directories:
+
+| syscall | calls | share of time |
+| --- | --- | --- |
+| `statx` | 27,888 | 55% |
+| `openat` | 6,200 | 14% |
+| `getdents64` | 7,078 | 14% |
+| `close` | 6,200 | 12% |
+| `ioctl` (FIEMAP) | 2,656 | 5% |
+
+One `statx` per entry, and it is 55% of the time. That is the irreducible part: the size has to come
+from somewhere and no unprivileged bulk interface will give it (see the two sections above).
+
+Two things in that table are *not* one-per-entry and were looked at:
+
+- **`getdents64` runs exactly twice per directory** — once returning entries, once returning zero to
+  prove the end. 385k extra syscalls, perhaps 0.6s of kernel CPU. It can be avoided by treating a
+  short return as end-of-directory, and it is **deliberately not avoided**: the kernel fills the
+  buffer greedily on local filesystems but does not promise to, and a filesystem that returns short
+  for its own reasons would have its directories silently truncated. That is the same shape as the
+  `EINVAL` loop above — silent loss, found only by someone noticing a missing subtree.
+- **`openat`/`close` are 1.75 per directory, not 1**, because the reflink probe opens files too.
+
+### The reflink probe, and why the threshold stays at 64 KiB
+
+The probe is the only part of the walk that is discretionary. It costs about **0.05s of wall and
+1.67s of CPU** — cheap in wall terms precisely because it parallelises well.
+
+Raising the size threshold is the obvious lever, and the curve says don't:
+
+| threshold | walk | reported total | distinct reflinked files found |
+| --- | --- | --- | --- |
+| **64 KiB** (current) | 0.466s | **785.4 GiB** | **10,805** |
+| 256 KiB | 0.407s | 786.6 GiB | 3,050 |
+| 1 MiB | 0.396s | 788.1 GiB | 885 |
+| 4 MiB | 0.385s | 789.9 GiB | 304 |
+
+Going to 1 MiB buys 0.07s and loses 9,920 shared files — 2.7 GiB counted twice that should not be.
+By this document's own standard a wrong number outranks a slow one, so 64 KiB stays. The table is
+recorded as the justification for the status quo, not as a tuning opportunity.
+
+### The one idea left, and why it was not built
+
+The probe costs 1.67s of CPU for 0.05s of wall, while the tree build that follows runs
+**single-threaded for 0.68s with more than twenty cores idle**. Moving the probe off the walk's
+critical path and into that idle time is the only structural change left that could lower the
+traversal figure.
+
+It cannot be done naively. The model needs `shared_extent` at the moment it charges an entry to a
+folder; probing afterwards means folder sizes that are wrong until the second pass lands and then
+change underneath the user. "The number moves after you have read it" is exactly what breaks the
+"delete this to free 15 GB" promise these sizes exist to make. Doing it properly means the model
+charging provisionally and reconciling, which is a larger change than the 0.05s justifies.
+
+### And none of it matters yet
+
+`pipeline = max(walk, model)` = `max(0.40, 0.68)` = **0.68s**. Every improvement to the walk is
+invisible until the model comes down, and the model's remaining win needs the packed-names change
+to `DirEntries` that the previous section declines to make blind against macOS `scan/bulk.rs`.
+
+The walk was asked to get under 0.43s. It is at 0.40s with reflink accounting and 0.35s without,
+and the next useful work is not here.
 
 
 ## Known gaps
