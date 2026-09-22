@@ -92,6 +92,7 @@ where
             &mut self.board,
             &self.ui_mode,
             &self.ui_effects,
+            &self.keybinds,
         );
     }
     pub fn flash_space_freed(&mut self) {

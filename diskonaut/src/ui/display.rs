@@ -7,6 +7,7 @@ use libdiskonaut::FileTree;
 use libdiskonaut::tiles::{Area, Board};
 
 use crate::UiMode;
+use crate::config::Keybinds;
 use crate::state::UiEffects;
 use crate::ui::grid::RectangleGrid;
 use crate::ui::modals::{ConfirmBox, ErrorBox, MessageBox, WarningBox};
@@ -46,6 +47,7 @@ where
         board: &mut Board,
         ui_mode: &UiMode,
         ui_effects: &UiEffects,
+        keybinds: &Keybinds,
     ) {
         self.terminal
             .draw(|f| {
@@ -116,7 +118,7 @@ where
                             grid_area,
                         );
                         f.render_widget(
-                            BottomLine::new()
+                            BottomLine::new(keybinds)
                                 .currently_selected(board.currently_selected())
                                 .last_read_path(ui_effects.last_read_path.as_ref())
                                 .hide_delete()
@@ -148,7 +150,7 @@ where
                             grid_area,
                         );
                         f.render_widget(
-                            BottomLine::new()
+                            BottomLine::new(keybinds)
                                 .currently_selected(board.currently_selected())
                                 .hide_small_files_legend(
                                     board.unrenderable_tile_coordinates.is_none(),
@@ -180,7 +182,7 @@ where
                             grid_area,
                         );
                         f.render_widget(
-                            BottomLine::new()
+                            BottomLine::new(keybinds)
                                 .currently_selected(board.currently_selected())
                                 .hide_small_files_legend(
                                     board.unrenderable_tile_coordinates.is_none(),
@@ -214,7 +216,7 @@ where
                             grid_area,
                         );
                         f.render_widget(
-                            BottomLine::new()
+                            BottomLine::new(keybinds)
                                 .currently_selected(board.currently_selected())
                                 .hide_small_files_legend(
                                     board.unrenderable_tile_coordinates.is_none(),
@@ -239,7 +241,7 @@ where
                                 chunks[0],
                             );
                             f.render_widget(
-                                BottomLine::new()
+                                BottomLine::new(keybinds)
                                     .currently_selected(board.currently_selected())
                                     .hide_small_files_legend(
                                         board.unrenderable_tile_coordinates.is_none(),
@@ -262,7 +264,7 @@ where
                                 chunks[0],
                             );
                             f.render_widget(
-                                BottomLine::new()
+                                BottomLine::new(keybinds)
                                     .currently_selected(board.currently_selected())
                                     .last_read_path(ui_effects.last_read_path.as_ref())
                                     .hide_delete()
@@ -305,7 +307,7 @@ where
                             grid_area,
                         );
                         f.render_widget(
-                            BottomLine::new()
+                            BottomLine::new(keybinds)
                                 .currently_selected(board.currently_selected())
                                 .last_read_path(ui_effects.last_read_path.as_ref())
                                 .hide_delete()

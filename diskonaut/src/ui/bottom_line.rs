@@ -7,6 +7,8 @@ use ::std::path::{Path, PathBuf};
 use libdiskonaut::format::{DisplaySize, truncate_middle};
 use libdiskonaut::tiles::{FileType, Tile};
 
+use crate::config::Keybinds;
+
 fn render_currently_selected(buf: &mut Buffer, currently_selected: &Tile, max_len: u16, y: u16) {
     let file_name = currently_selected.name.to_string_lossy();
     let size = DisplaySize(currently_selected.size as f64);
@@ -59,22 +61,44 @@ fn render_last_read_path(buf: &mut Buffer, last_read_path: &Path, max_len: u16, 
     }
 }
 
-fn render_controls_legend(buf: &mut Buffer, hide_delete: bool, max_len: u16, y: u16) {
-    let (long_controls_line, short_controls_line) = if hide_delete {
-        (
-            String::from(
-                "<arrows> - move around, <ENTER> - enter folder, <ESC> - parent folder, <+/-/0> - zoom in/out/reset, <q> - quit",
-            ),
-            String::from("←↓↑→/<ENTER>/<ESC>: navigate"),
-        )
+/// The help line, spelled with the keys actually bound so that it cannot disagree with them.
+fn controls_legend(kb: &Keybinds, hide_delete: bool) -> (String, String) {
+    let delete_long = if hide_delete {
+        String::new()
     } else {
-        (
-            String::from(
-                "<arrows> - move around, <ENTER> - enter folder, <ESC> - parent folder, <BACKSPACE> - delete, <+/-/0> - zoom in/out/reset, <q> - quit",
-            ),
-            String::from("←↓↑→/<ENTER>/<ESC>: navigate, <BACKSPACE>: del"),
-        )
+        format!("<{}> - delete, ", kb.delete)
     };
+    let delete_short = if hide_delete {
+        String::new()
+    } else {
+        format!(", <{}>: del", kb.delete)
+    };
+    (
+        format!(
+            "<arrows> - move around, <{enter}> - enter folder, <{parent}> - parent folder, \
+             {delete_long}<{zoom_in}/{zoom_out}/{reset_zoom}> - zoom in/out/reset, <{quit}> - quit",
+            enter = kb.enter,
+            parent = kb.parent,
+            zoom_in = kb.zoom_in,
+            zoom_out = kb.zoom_out,
+            reset_zoom = kb.reset_zoom,
+            quit = kb.quit,
+        ),
+        format!(
+            "←↓↑→/<{}>/<{}>: navigate{delete_short}",
+            kb.enter, kb.parent
+        ),
+    )
+}
+
+fn render_controls_legend(
+    buf: &mut Buffer,
+    keybinds: &Keybinds,
+    hide_delete: bool,
+    max_len: u16,
+    y: u16,
+) {
+    let (long_controls_line, short_controls_line) = controls_legend(keybinds, hide_delete);
     let too_small_line = "(...)";
     if max_len >= long_controls_line.chars().count() as u16 {
         buf.set_string(
@@ -115,6 +139,7 @@ fn render_small_files_legend(buf: &mut Buffer, x: u16, y: u16, small_files_legen
 }
 
 pub struct BottomLine<'a> {
+    keybinds: &'a Keybinds,
     hide_delete: bool,
     hide_small_files_legend: bool,
     currently_selected: Option<&'a Tile>,
@@ -122,8 +147,9 @@ pub struct BottomLine<'a> {
 }
 
 impl<'a> BottomLine<'a> {
-    pub fn new() -> Self {
+    pub fn new(keybinds: &'a Keybinds) -> Self {
         Self {
+            keybinds,
             hide_delete: false,
             hide_small_files_legend: false,
             currently_selected: None,
@@ -175,6 +201,45 @@ impl<'a> Widget for BottomLine<'a> {
             );
         }
 
-        render_controls_legend(buf, self.hide_delete, max_controls_len, controls_line_y);
+        render_controls_legend(
+            buf,
+            self.keybinds,
+            self.hide_delete,
+            max_controls_len,
+            controls_line_y,
+        );
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::config::KeyBinding;
+    use ratatui::crossterm::event::KeyCode;
+
+    #[test]
+    fn legend_names_the_bound_delete_key() {
+        let (long, short) = controls_legend(&Keybinds::default(), false);
+        assert!(long.contains("<d> - delete"), "{long}");
+        assert!(short.contains("<d>: del"), "{short}");
+        assert!(!long.contains("BACKSPACE"), "{long}");
+    }
+
+    #[test]
+    fn legend_follows_a_rebound_delete_key() {
+        let kb = Keybinds {
+            delete: KeyBinding::key(KeyCode::Backspace),
+            ..Keybinds::default()
+        };
+        let (long, short) = controls_legend(&kb, false);
+        assert!(long.contains("<BACKSPACE> - delete"), "{long}");
+        assert!(short.contains("<BACKSPACE>: del"), "{short}");
+    }
+
+    #[test]
+    fn legend_omits_delete_when_hidden() {
+        let (long, short) = controls_legend(&Keybinds::default(), true);
+        assert!(!long.contains("delete"), "{long}");
+        assert!(!short.contains("del"), "{short}");
     }
 }

@@ -22,6 +22,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   folder. The board then showed that single entry at 100% with no "small files" marker and no
   legend, as if the scan had missed the rest. The `x` marker is now always drawn for hidden
   entries, clamped to at least a few cells inside the board, and zoom (`+`) reveals them as before.
+- The help line at the bottom of the screen still advertised `<BACKSPACE> - delete`, a key that
+  has done nothing since keybinds became configurable with `d` as the default. The help line is now
+  built from the configured keybinds, so it always names the keys that actually work. To keep
+  Backspace, set `delete = "backspace"` in `~/.config/diskonaut/config.toml`.
 
 ## [0.13.0] - 2026-09-04
 

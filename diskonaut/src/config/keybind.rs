@@ -171,6 +171,31 @@ impl Keybinds {
     }
 }
 
+/// The label shown for a key in the on-screen help, e.g. `d`, `BACKSPACE`, `ctrl+c`.
+impl ::std::fmt::Display for KeyBinding {
+    fn fmt(&self, f: &mut ::std::fmt::Formatter<'_>) -> ::std::fmt::Result {
+        if self.modifiers.contains(KeyModifiers::CONTROL) {
+            f.write_str("ctrl+")?;
+        }
+        if self.modifiers.contains(KeyModifiers::SHIFT) && !matches!(self.code, KeyCode::Char(_)) {
+            f.write_str("shift+")?;
+        }
+        match self.code {
+            KeyCode::Char(' ') => f.write_str("SPACE"),
+            KeyCode::Char(c) => write!(f, "{c}"),
+            KeyCode::Enter => f.write_str("ENTER"),
+            KeyCode::Esc => f.write_str("ESC"),
+            KeyCode::Backspace => f.write_str("BACKSPACE"),
+            KeyCode::Left => f.write_str("LEFT"),
+            KeyCode::Right => f.write_str("RIGHT"),
+            KeyCode::Up => f.write_str("UP"),
+            KeyCode::Down => f.write_str("DOWN"),
+            KeyCode::Tab => f.write_str("TAB"),
+            other => write!(f, "{other:?}"),
+        }
+    }
+}
+
 fn single_char(s: &str) -> Result<char, String> {
     let mut chars = s.chars();
     let c = chars
