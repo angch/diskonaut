@@ -29,6 +29,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Known issues
 
+- The scan is now bound by tree building rather than traversal: the walk is 0.43s of a 0.72s scan
+  on a 4.2M-entry volume and is fully hidden behind the model. Filesystem-specific metadata APIs
+  would buy about 3% even if they were free and available, which they are not.
+
 - A scan of `/` double-counts any filesystem mounted in more than one place — on a machine with
   one filesystem at both `/data` and `/home` it reports 1.8 TiB against about 1 TiB held. The
   double count is not new, but `/` now finishes fast enough for anyone to see it. Use `-x` for a

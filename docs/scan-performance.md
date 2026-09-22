@@ -907,8 +907,10 @@ walker" below for what they cost and what they bought.**
    ```
 
    The tree build is **0.85s** — 4.97M entries/s, and identical totals to every other stage, so it
-   is doing the whole job. (Superseded: fed by the native walker's one group per directory instead
-   of `dua-core`'s ~2.2 groups per directory, the same stage reads 0.37–0.51s. Take the lower
+   is doing the whole job. (Superseded twice over: fed by the native walker's one group per
+   directory instead of `dua-core`'s ~2.2 groups, the same stage reads 0.37–0.51s, and the last
+   section of this document shows that figure itself is ~1.5x too low — the model really costs
+   about 0.7s. Take the lower
    figure as the model's cost and this one as the model's cost *plus* the grouping waste. The stage
    is also distorted — see the following section's known gaps.) Against `pipeline` at 2.37–2.52s and `walk` at 2.22–2.32s, the split is
    roughly 2.2s of walk hiding 0.85s of model. A walker landing anywhere under ~0.9s makes the tree
@@ -1354,6 +1356,121 @@ The other three, more briefly:
   the trap finding #7 records. It needs a build on a Mac before release.
 - **`cargo deny check` was not run**; `cargo-deny` is not installed here. `Cargo.lock` is unchanged,
   but rustix's feature set is (`std` and `fs` added), so the licence and advisory gates are unproven.
+
+## Is there a filesystem-specific way to go faster? (2026-09-22, after the walker)
+
+Asked again once the native walker had landed, which is the right time to ask: the answer changed,
+because the bottleneck did.
+
+### The walk is no longer the bottleneck
+
+Interleaved runs at the default thread count, `/data`:
+
+```
+walk     0.434  0.436  0.413  0.434  0.415  0.448  0.418  0.416
+tree     0.682  0.691  0.681  0.701  0.690  0.751  0.710  0.682
+pipeline 0.738  0.732  0.692  0.734  0.706  0.721  0.698  0.735
+```
+
+`pipeline` is not `max(walk, model)` with the model hidden — it sits at `tree`. Sweeping threads
+shows why, and the shape is unambiguous:
+
+| threads | 2 | 4 | 6 | 12 | 24 |
+| --- | --- | --- | --- | --- | --- |
+| `walk` | 2.563s | 1.328s | 0.931s | 0.548s | 0.434s |
+| `pipeline` | 2.805s | 1.458s | 1.034s | 0.923s | 0.725s |
+
+Up to six workers `pipeline` tracks `walk` within ~0.1s: the model is hidden behind the traversal,
+as it was designed to be. Past twelve, `pipeline` stops following `walk` down and flattens at
+~0.72s while `walk` keeps falling to 0.43s. That floor is the model.
+
+**So `pipeline ~= max(walk, ~0.70s)`.** The tree build costs about 0.7s for 4.23M entries (~166ns
+each), the walk costs 0.43s, and the walk is already entirely hidden behind it.
+
+This also gives a better number for the model than `tree-only` does. That stage reports 0.42-0.48s
+and is the distorted one — its untimed `collect()` leaves the allocator and page cache in a state
+the real pipeline never sees, so it under-reports by roughly 1.5x. `tree`, where a single consuming
+thread drives the walk, lands at 0.69s and agrees with the `pipeline` floor. **Prefer `tree` over
+`tree-only` when asking what the model costs.**
+
+### Which caps every filesystem-specific idea at about 3%
+
+Every bulk-metadata mechanism — XFS `BULKSTAT`, `GETFSMAP`, a hypothetical ext4 equivalent —
+attacks the per-file `statx` and nothing else. Single-threaded that was measured at 0.93s for
+`getdents64` alone against 4.4s with a stat per entry, so the stat is ~78% of traversal. Scaled to
+the current walk, that is roughly **0.34s of statx and 0.09s of getdents**.
+
+Make the stat *free* — the ceiling no real API reaches — and the walk goes 0.43s to 0.09s, while
+the scan goes:
+
+```
+max(0.43, 0.70) = 0.72s   ->   max(0.09, 0.70) = 0.70s
+```
+
+**About 3%.** That is the entire prize, before any of it is shown to be reachable. It is not
+reachable: bulkstat is `EPERM` unprivileged and returns inodes without names, so it cannot replace
+a walk at all — only serve as a size oracle joined on inode, which is a large architectural change
+for a fraction of that 3% — and `GETFSMAP` is callable but redacts every owner.
+
+The other candidates were measured earlier in this document and are all zero or negative: a minimal
+`statx` mask, `AT_STATX_DONT_SYNC`, skipping stats on directories, and `io_uring` batching (3.8x
+*slower*).
+
+### ext4 specifically
+
+No supported userspace bulk-metadata API, as before. `EXT4_IOC_PRECACHE_EXTENTS` is per-file extent
+caching, not metadata enumeration. Reading the inode table directly (the `e2image` approach) needs
+root and a quiescent filesystem and is not appropriate for a live tool. Nothing has changed here.
+
+### The one filesystem-aware lever left, and why it is not tested
+
+**Stat in inode order, not readdir order.** Both ext4 (with `dir_index`) and XFS return directory
+entries in name-hash order, which is uncorrelated with inode number, so the inode table is touched
+at random. Sorting a directory's entries by `d_ino` — which `getdents64` already returns, for free —
+makes that access sequential. It is the classic trick, and the only genuinely filesystem-shaped
+optimisation this exercise has not tried.
+
+It is untested here because **it can only pay on a cold cache, and every measurement in this
+document is warm** — `/proc/diskstats` shows zero sectors read from `bcache0` during a full scan.
+Warm, sorting changes no syscalls and no lookups, and in-core inodes are slab-allocated rather than
+laid out by inode number, so there is nothing for the ordering to exploit. Testing it honestly
+needs `/proc/sys/vm/drop_caches`, which is mode `0200` and root-owned.
+
+Worth doing if cold scans ever matter — a first scan after boot, or a volume much larger than RAM.
+It would not move any number in this document.
+
+### An allocator experiment that failed usefully
+
+The model at 0.7s is 4.2M `OsString`s, per-directory `Vec`s and `Arc<Path>`s allocated across 24
+worker threads and freed on one consumer thread — the pattern glibc's malloc is supposed to handle
+worst. Swapping in mimalloc as the global allocator tested that in a few minutes:
+
+| | glibc | mimalloc |
+| --- | --- | --- |
+| `walk` | 0.43s | 0.51-0.69s |
+| `tree` | 0.69s | 1.49-2.30s |
+| `pipeline` | 0.72s | 1.56-2.05s |
+
+Two to three times *worse* across the board, so the hypothesis is dead and the dependency was
+reverted. Recorded because the negative result is the useful part: the model's cost is not glibc
+arena contention, and whatever it is will not be fixed by changing allocator.
+
+### The answer
+
+No. Not on this machine, not warm, not without root — and the ceiling if all three were solved is
+about 3% of the scan.
+
+The remaining time is in the data model, which is not a filesystem question. If this is picked up
+again the targets are the ~166ns per entry the tree build costs and the 4.2M string allocations
+underneath it — an arena, or interned names — not another ioctl.
+
+Two measurements would close the file, neither takeable from here:
+
+- `sudo ./docs/probes/fsmap_scan /data` — confirms the ownership redaction is a privilege check and
+  prices the inode-to-size oracle at its true ceiling.
+- A cold scan after `echo 3 > /proc/sys/vm/drop_caches`, with and without `d_ino` ordering, which is
+  the only regime where the answer above might be different.
+
 
 ## Known gaps
 
