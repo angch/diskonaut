@@ -15,6 +15,14 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   a fast non-cryptographic hasher. On a 2.2M-entry ext4 volume the app's load path went from ~5.2s
   to ~2.4s, and peak RSS from ~870 MB to ~430 MB. See `docs/scan-performance.md`.
 
+### Fixed
+
+- The treemap silently dropped every entry too small to draw when their combined tile rounded to
+  zero cells, which happens whenever one entry (a `target/` or `.git/`, say) holds nearly all of a
+  folder. The board then showed that single entry at 100% with no "small files" marker and no
+  legend, as if the scan had missed the rest. The `x` marker is now always drawn for hidden
+  entries, clamped to at least a few cells inside the board, and zoom (`+`) reveals them as before.
+
 ## [0.13.0] - 2026-09-04
 
 ### Changed

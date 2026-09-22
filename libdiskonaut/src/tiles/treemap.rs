@@ -4,19 +4,28 @@ const HEIGHT_WIDTH_RATIO: f64 = 2.5;
 const MINIMUM_HEIGHT: u16 = 3;
 const MINIMUM_WIDTH: u16 = 8;
 
+/// The least the "small files" placeholder may occupy, so that hidden entries always leave a
+/// visible trace: a border plus at least one row of one or two `x` cells inside it.
+const SMALL_FILES_MINIMUM_HEIGHT: u16 = 3;
+const SMALL_FILES_MINIMUM_WIDTH: u16 = 4;
+
 pub struct TreeMap {
     pub tiles: Vec<Tile>,
+    /// Top-left corner of the "small files" placeholder, which extends to the bottom-right of
+    /// the board. `None` when every entry got a tile of its own.
     pub unrenderable_tile_coordinates: Option<(u16, u16)>,
+    bounds: Area,
     empty_space: RectFloat,
     total_size: f64,
 }
 impl TreeMap {
-    pub fn new(empty_space: &Area) -> Self {
-        let empty_space = RectFloat::new(empty_space);
+    pub fn new(bounds: &Area) -> Self {
+        let empty_space = RectFloat::new(bounds);
         TreeMap {
             tiles: vec![],
             unrenderable_tile_coordinates: None,
             total_size: (empty_space.height * empty_space.width),
+            bounds: *bounds,
             empty_space,
         }
     }
@@ -96,21 +105,28 @@ impl TreeMap {
             self.empty_space.x += length_of_row_second_side;
         }
     }
+    /// Record that `tile` was too small to draw, growing the "small files" placeholder to cover
+    /// it.
+    ///
+    /// A tile that rounds to zero cells still stands for real entries. When everything but one
+    /// huge entry falls below the minimum tile size, all of the hidden tiles round to nothing, and
+    /// dropping them would leave the board with no hint that anything else exists. So the
+    /// placeholder is kept, and pulled in from the board's edge far enough to be visible.
     fn add_unrenderable_tile(&mut self, tile: &Tile) {
-        if tile.width == 0 || tile.height == 0 {
-            // this is a rounding error, do not add it
-            return;
-        }
-        match self.unrenderable_tile_coordinates {
-            Some((x, y)) => {
-                let x = if tile.x < x { tile.x } else { x };
-                let y = if tile.y < y { tile.y } else { y };
-                self.unrenderable_tile_coordinates = Some((x, y));
-            }
-            None => {
-                self.unrenderable_tile_coordinates = Some((tile.x, tile.y));
-            }
-        }
+        let right = self.bounds.x + self.bounds.width;
+        let bottom = self.bounds.y + self.bounds.height;
+        let x = tile
+            .x
+            .min(right.saturating_sub(SMALL_FILES_MINIMUM_WIDTH))
+            .max(self.bounds.x);
+        let y = tile
+            .y
+            .min(bottom.saturating_sub(SMALL_FILES_MINIMUM_HEIGHT))
+            .max(self.bounds.y);
+        self.unrenderable_tile_coordinates = match self.unrenderable_tile_coordinates {
+            Some((current_x, current_y)) => Some((x.min(current_x), y.min(current_y))),
+            None => Some((x, y)),
+        };
     }
 
     fn worst_in_renderable_row(

@@ -157,6 +157,9 @@ and the data model is free, so measure the walker before optimising anything els
 - Core algorithm: `libdiskonaut/src/tiles/treemap.rs`
 - Tile rendering: `diskonaut/src/ui/grid/`
 - Adjust `HEIGHT_WIDTH_RATIO`, `MINIMUM_HEIGHT`, `MINIMUM_WIDTH` constants
+- Entries below the minimum tile size are never dropped: they fold into the "small files" `x`
+  marker, whose corner is clamped by `SMALL_FILES_MINIMUM_WIDTH/HEIGHT` so it stays visible even
+  when the hidden entries round to zero cells
 
 ---
 
