@@ -198,7 +198,7 @@ fn start<B>(
                         if !running.load(Ordering::Acquire) {
                             break 'scanning;
                         }
-                        batched_entries += directory.entries.len().max(1);
+                        batched_entries += directory.len().max(1);
                         batch.push(directory);
                         if batched_entries >= SCAN_BATCH_SIZE {
                             batched_entries = 0;

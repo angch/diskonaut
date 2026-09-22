@@ -10,7 +10,7 @@
 //! results to the consumer over a bounded channel. A directory is read by exactly one worker and
 //! leaves as exactly one [`DirEntries`], so the tree builder resolves each parent once.
 
-use ::std::ffi::{OsStr, OsString};
+use ::std::ffi::OsStr;
 use ::std::mem::MaybeUninit;
 use ::std::os::fd::AsFd;
 use ::std::os::unix::ffi::OsStrExt;
@@ -22,7 +22,7 @@ use ::std::thread::JoinHandle;
 
 use ::rustix::fs::{AtFlags, FileType, Mode, OFlags, RawDir, StatxFlags, openat, statx};
 
-use super::{DirEntries, EntryMeta, NamedEntry, ScanOptions};
+use super::{DirEntries, EntryMeta, ScanOptions};
 
 /// One directory waiting to be read.
 struct Job {
@@ -114,9 +114,8 @@ const WANTED: StatxFlags = StatxFlags::TYPE
 
 /// Read one directory, returning its entries and the subdirectories to descend into.
 fn read_directory(job: &Job, options: &ScanOptions, scan_device: u64) -> (DirEntries, Vec<Job>) {
-    let mut entries = Vec::new();
+    let mut directory = DirEntries::new(Arc::clone(&job.path));
     let mut children = Vec::new();
-    let mut failed = 0u64;
 
     let dir = match openat(
         rustix::fs::CWD,
@@ -126,14 +125,8 @@ fn read_directory(job: &Job, options: &ScanOptions, scan_device: u64) -> (DirEnt
     ) {
         Ok(dir) => dir,
         Err(_) => {
-            return (
-                DirEntries {
-                    path: Arc::clone(&job.path),
-                    entries,
-                    failed: 1,
-                },
-                children,
-            );
+            directory.failed = 1;
+            return (directory, children);
         }
     };
 
@@ -154,7 +147,7 @@ fn read_directory(job: &Job, options: &ScanOptions, scan_device: u64) -> (DirEnt
                 // the next call: `/proc/<pid>/net` for a process that has since died returns
                 // `EINVAL` every time, and retrying it is an infinite loop. `std`'s `ReadDir` ends
                 // on the first error too.
-                failed += 1;
+                directory.failed += 1;
                 break;
             }
         };
@@ -178,7 +171,7 @@ fn read_directory(job: &Job, options: &ScanOptions, scan_device: u64) -> (DirEnt
         ) else {
             // A file that vanished between the readdir and the stat, or one whose parent we may
             // list but not interrogate. Counted, not guessed at.
-            failed += 1;
+            directory.failed += 1;
             continue;
         };
 
@@ -233,26 +226,21 @@ fn read_directory(job: &Job, options: &ScanOptions, scan_device: u64) -> (DirEnt
             }
         }
 
-        entries.push(NamedEntry {
-            name: OsString::from(OsStr::from_bytes(name.to_bytes())),
-            meta: EntryMeta {
+        // Straight from the `getdents64` buffer into the packed one: no allocation per entry.
+        directory.push(
+            OsStr::from_bytes(name.to_bytes()),
+            EntryMeta {
                 size,
                 inode: stat.stx_ino,
                 links: u64::from(stat.stx_nlink),
                 is_dir,
                 shared_extent,
             },
-        });
+        );
     }
 
-    (
-        DirEntries {
-            path: Arc::clone(&job.path),
-            entries,
-            failed,
-        },
-        children,
-    )
+    directory.shrink();
+    (directory, children)
 }
 
 /// Copy-on-write sharing, asked about one file at a time.
@@ -599,7 +587,7 @@ fn worker(
         // `max(1)` so that a run of empty directories still flushes. Counting only entries, a
         // worker walking a wide tree of empty directories would hold every one of them until it
         // ran out of work, and the consumer would sit idle waiting for a batch that never filled.
-        outbox_entries += directory.entries.len().max(1);
+        outbox_entries += directory.len().max(1);
         outbox.push(directory);
         if outbox_entries >= SEND_BATCH {
             outbox_entries = 0;

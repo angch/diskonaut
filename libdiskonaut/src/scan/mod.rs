@@ -1,7 +1,8 @@
 //! Parallel directory traversal (`dua-core`).
 
-use ::std::ffi::OsString;
+use ::std::ffi::OsStr;
 use ::std::num::NonZero;
+use ::std::os::unix::ffi::OsStrExt;
 use ::std::path::{Path, PathBuf};
 use ::std::sync::Arc;
 
@@ -112,21 +113,123 @@ impl EntryMeta {
 }
 
 /// An entry named relative to the directory that contains it.
-#[derive(Debug)]
+///
+/// The name is not here: it lives in the owning [`DirEntries`]' packed buffer, and this records
+/// where. An `OsString` per entry costs 24 bytes wherever it is stored plus a heap block of its
+/// own, and a whole-volume scan makes millions of them only to hand them straight to the tree.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct NamedEntry {
-    pub name: OsString,
+    offset: u32,
+    len: u32,
     pub meta: EntryMeta,
+}
+
+impl NamedEntry {
+    /// Where this entry's name sits in the buffer that owns it.
+    #[must_use]
+    pub fn name_range(&self) -> ::std::ops::Range<usize> {
+        let start = self.offset as usize;
+        start..start + self.len as usize
+    }
 }
 
 /// Every entry of one directory, and the number of its entries that could not be read.
 ///
 /// Directory-at-a-time delivery is what lets the tree builder resolve a parent once per directory
-/// instead of once per file.
+/// instead of once per file. The names are concatenated into one buffer rather than allocated
+/// individually, so a directory costs one allocation for all of its names and the tree can take
+/// that buffer over without copying it.
 #[derive(Debug)]
 pub struct DirEntries {
     pub path: Arc<Path>,
-    pub entries: Vec<NamedEntry>,
+    /// Every entry's name, end to end, in entry order.
+    names: Vec<u8>,
+    entries: Vec<NamedEntry>,
     pub failed: u64,
+}
+
+impl DirEntries {
+    #[must_use]
+    pub fn new(path: Arc<Path>) -> Self {
+        Self {
+            path,
+            names: Vec::new(),
+            entries: Vec::new(),
+            failed: 0,
+        }
+    }
+
+    /// A directory known to hold about `entries` entries and `name_bytes` of names between them.
+    #[must_use]
+    pub fn with_capacity(path: Arc<Path>, entries: usize, name_bytes: usize) -> Self {
+        Self {
+            path,
+            names: Vec::with_capacity(name_bytes),
+            entries: Vec::with_capacity(entries),
+            failed: 0,
+        }
+    }
+
+    /// Append an entry, copying its name into the buffer.
+    ///
+    /// # Panics
+    ///
+    /// If one directory's names exceed 4 GiB, which no filesystem permits.
+    pub fn push(&mut self, name: &OsStr, meta: EntryMeta) {
+        let bytes = name.as_bytes();
+        let offset = u32::try_from(self.names.len()).expect("a directory's names fit in 4 GiB");
+        let len = u32::try_from(bytes.len()).expect("a name fits in 4 GiB");
+        self.names.extend_from_slice(bytes);
+        self.entries.push(NamedEntry { offset, len, meta });
+    }
+
+    /// The name of an entry belonging to this directory.
+    #[must_use]
+    pub fn name(&self, entry: &NamedEntry) -> &OsStr {
+        OsStr::from_bytes(&self.names[entry.name_range()])
+    }
+
+    #[must_use]
+    pub fn entries(&self) -> &[NamedEntry] {
+        &self.entries
+    }
+
+    #[must_use]
+    pub fn len(&self) -> usize {
+        self.entries.len()
+    }
+
+    #[must_use]
+    pub fn is_empty(&self) -> bool {
+        self.entries.is_empty()
+    }
+
+    /// Every entry, as a name and its metadata.
+    pub fn iter(&self) -> impl Iterator<Item = (&OsStr, &EntryMeta)> {
+        self.entries.iter().map(|entry| {
+            (
+                OsStr::from_bytes(&self.names[entry.name_range()]),
+                &entry.meta,
+            )
+        })
+    }
+
+    /// Give back the slack both vectors grew while the directory was being read.
+    ///
+    /// They are filled by pushing, so they double as they go and end up around half again as large
+    /// as they need to be — and the tree keeps them for the life of the scan, so that slack is
+    /// permanent. One realloc per directory buys it back.
+    pub fn shrink(&mut self) {
+        self.names.shrink_to_fit();
+        self.entries.shrink_to_fit();
+    }
+
+    /// Hand over the name buffer and the entries, so the tree can take the buffer rather than
+    /// copy out of it.
+    #[must_use]
+    pub fn into_parts(self) -> (Arc<Path>, Vec<u8>, Vec<NamedEntry>) {
+        (self.path, self.names, self.entries)
+    }
 }
 
 /// Walk `root`, yielding the contents of one directory at a time.
@@ -161,8 +264,8 @@ pub fn scan_directories(root: &Path, options: ScanOptions) -> impl Iterator<Item
 #[cfg_attr(any(target_os = "macos", target_os = "linux"), allow(dead_code))]
 mod fallback {
     use super::{
-        DirEntries, EntryMeta, NamedEntry, Options, Order, ScanOptions, descend_predicate,
-        dua_thread_count, entry_identity, entry_size, walk,
+        DirEntries, EntryMeta, Options, Order, ScanOptions, descend_predicate, dua_thread_count,
+        entry_identity, entry_size, walk,
     };
     use ::std::path::Path;
     use ::std::sync::Arc;
@@ -205,11 +308,9 @@ mod fallback {
                         match &mut open {
                             Some(open) => open.failed += 1,
                             None => {
-                                return Some(DirEntries {
-                                    path: Arc::clone(&root),
-                                    entries: Vec::new(),
-                                    failed: 1,
-                                });
+                                let mut lost = DirEntries::new(Arc::clone(&root));
+                                lost.failed = 1;
+                                return Some(lost);
                             }
                         }
                         continue;
@@ -230,15 +331,12 @@ mod fallback {
                 }
                 let named = metadata.ok().map(|metadata| {
                     let (inode, links) = entry_identity(&metadata);
-                    NamedEntry {
-                        name: file_name,
-                        meta: EntryMeta {
-                            size: entry_size(&metadata, apparent),
-                            inode,
-                            links,
-                            is_dir: file_type.is_dir(),
-                            shared_extent: 0,
-                        },
+                    EntryMeta {
+                        size: entry_size(&metadata, apparent),
+                        inode,
+                        links,
+                        is_dir: file_type.is_dir(),
+                        shared_extent: 0,
                     }
                 });
 
@@ -247,23 +345,19 @@ mod fallback {
                         if Arc::ptr_eq(&open.path, &parent_path) || open.path == parent_path =>
                     {
                         match named {
-                            Some(named) => open.entries.push(named),
+                            Some(meta) => open.push(&file_name, meta),
                             None => open.failed += 1,
                         }
                     }
                     // A different directory: start its group, and hand back the finished one.
                     // The new group already holds this entry, so nothing is lost by returning.
                     _ => {
-                        let failed = u64::from(named.is_none());
-                        let mut entries = Vec::with_capacity(32);
-                        if let Some(named) = named {
-                            entries.push(named);
+                        let mut group = DirEntries::with_capacity(parent_path, 32, 32 * 32);
+                        match named {
+                            Some(meta) => group.push(&file_name, meta),
+                            None => group.failed = 1,
                         }
-                        let finished = open.replace(DirEntries {
-                            path: parent_path,
-                            entries,
-                            failed,
-                        });
+                        let finished = open.replace(group);
                         if let Some(finished) = finished {
                             return Some(finished);
                         }
@@ -448,7 +542,7 @@ pub fn scan_into_tree(root: impl AsRef<Path>, options: ScanOptions) -> (FileTree
 
     for directory in scan_directories(&root_path, options) {
         failed_to_read += directory.failed;
-        tree.add_dir_entries(&directory.path, directory.entries);
+        tree.add_dir_entries(directory);
     }
 
     (tree, failed_to_read)

@@ -1739,6 +1739,61 @@ The walk was asked to get under 0.43s. It is at 0.40s with reflink accounting an
 and the next useful work is not here.
 
 
+## Packed names, end to end (2026-09-22)
+
+The change the previous section named as "what would actually work", now measured rather than
+predicted. `DirEntries` carries one buffer holding all of a directory's names, entries refer to
+theirs by offset and length, and the tree **takes that buffer** instead of copying names out of it.
+No name is allocated between the `getdents64` buffer and the folder that ends up holding it.
+
+| | before | after |
+| --- | --- | --- |
+| `walk` | 0.43–0.47s | **0.385–0.421s** |
+| `walk` peak RSS | 134 MB | **74 MB** |
+| `tree` | 0.67–0.69s | **0.623–0.669s** |
+| `pipeline` | 0.70–0.81s | **0.649–0.678s** |
+| `pipeline` peak RSS | 654–670 MB | **617 MB** |
+
+Entry counts, totals, hard-link and reflink counts are unchanged.
+
+So: real, and smaller than predicted. The prediction was ~430 MB and it landed at 617 MB. Two
+things account for the gap, and both were measured rather than guessed.
+
+**The buffers arrived half empty.** They are filled by pushing, so they double as they go, and the
+tree then keeps that slack for the life of the scan. Counting what was handed over: 125.3 MB of
+names in 190.3 MB of capacity — **52% overshoot**. One `shrink_to_fit` per directory before the
+buffer is sent brought capacity to exactly 125.4 MB and peak RSS down by ~30 MB. Worth knowing in
+general: a `Vec` that is grown by pushing and then *retained* pays its growth slack forever.
+
+The move itself works as intended — of 385,497 directories handed to the tree, **384,991 had their
+buffer moved and 506 copied**. The copies are folders whose own group arrived after one of their
+children's, so a placeholder was already sitting in the buffer.
+
+**The rest is the allocator, and it is not worth buying back.** With names allocated on 24 worker
+threads and never freed — the tree keeps them — each thread's glibc arena grows and none of it is
+reused. Capping the arenas proves it and prices it:
+
+| | peak RSS | `pipeline` |
+| --- | --- | --- |
+| default | 625 MB | 0.667–0.697s |
+| `MALLOC_ARENA_MAX=4` | 586 MB | 1.25–1.42s |
+| `MALLOC_ARENA_MAX=1` | 538 MB | 2.67–2.90s |
+
+88 MB for **four times the wall clock**. Left alone.
+
+### What this cost elsewhere
+
+`NamedEntry` no longer carries a name, which is a breaking change to the library's scan API and
+touches every walker. The `dua-core` fallback and the macOS `getattrlistbulk` walker both collect
+entries before they know they have a whole directory, so they keep owned names and pack them where
+a `DirEntries` is built — one copy per entry on those paths, and none on Linux.
+
+**The macOS walker is changed but unverified.** `scan/bulk.rs` is `cfg`'d out on Linux and there is
+no Mac here, so it has been checked by reading and by `rustfmt` parsing it, and that is all. It
+needs a build and a run on macOS before release. This is the trap finding #7 records, entered
+deliberately and with the user's agreement rather than by accident.
+
+
 ## Known gaps
 
 - The reported total for `/` is ~706 GiB against 884 GiB used. The difference is APFS snapshots,

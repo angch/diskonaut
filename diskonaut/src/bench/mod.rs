@@ -174,13 +174,13 @@ fn bench_scan(path: &Path, options: ScanOptions, build_tree: bool) -> StageResul
     let mut failed = 0u64;
     let mut total_size = 0u128;
     for directory in scan_directories(path, options) {
-        entries += directory.entries.len() as u64;
+        entries += directory.len() as u64;
         failed += directory.failed;
         if build_tree {
-            tree.add_dir_entries(&directory.path, directory.entries);
+            tree.add_dir_entries(directory);
         } else {
             total_size += directory
-                .entries
+                .entries()
                 .iter()
                 .map(|entry| u128::from(entry.meta.size))
                 .sum::<u128>();
@@ -214,9 +214,9 @@ fn bench_tree_only(path: &Path, options: ScanOptions) -> StageResult {
     let mut entries = 0u64;
     let mut failed = 0u64;
     for directory in directories {
-        entries += directory.entries.len() as u64;
+        entries += directory.len() as u64;
         failed += directory.failed;
-        tree.add_dir_entries(&directory.path, directory.entries);
+        tree.add_dir_entries(directory);
     }
 
     finish("tree-only", start, entries, failed, tree)
@@ -237,7 +237,7 @@ fn bench_pipeline(path: &Path, options: ScanOptions) -> StageResult {
             let mut batch = Vec::with_capacity(128);
             let mut batched = 0usize;
             for directory in scan_directories(&path, options) {
-                batched += directory.entries.len().max(1);
+                batched += directory.len().max(1);
                 batch.push(directory);
                 if batched >= BATCH {
                     batched = 0;
@@ -256,9 +256,9 @@ fn bench_pipeline(path: &Path, options: ScanOptions) -> StageResult {
     let mut failed = 0u64;
     while let Ok(batch) = receiver.recv() {
         for directory in batch {
-            entries += directory.entries.len() as u64;
+            entries += directory.len() as u64;
             failed += directory.failed;
-            tree.add_dir_entries(&directory.path, directory.entries);
+            tree.add_dir_entries(directory);
         }
     }
     let _ = scanner.join();

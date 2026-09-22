@@ -46,7 +46,7 @@ pub fn files_in_folder(folder: &Folder, offset: usize) -> Vec<FileMetadata> {
     for (name, file_or_folder) in &folder.contents {
         files.push({
             let size = file_or_folder.size();
-            let name = name.clone();
+            let name = name.to_os_string();
             let (descendants, file_type) = match file_or_folder {
                 FileOrFolder::Folder(folder) => (Some(folder.num_descendants), FileType::Folder),
                 FileOrFolder::File(_file) => (None, FileType::File),

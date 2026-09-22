@@ -14,6 +14,13 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Changed
 
+- A directory's entry names travel and are stored as one packed buffer instead of an `OsString`
+  each, and the folder tree takes that buffer rather than copying names out of it — so a name is
+  never allocated between the kernel and the tree. Traversal peak memory halved (134 MB to 74 MB),
+  a whole-volume scan went from 0.70-0.81s to 0.65-0.68s and its peak from 654-670 MB to 617 MB.
+  `NamedEntry` no longer carries a name, which is a breaking change for anyone using the scan API
+  directly. The macOS walker is updated but unverified — it needs a build on a Mac.
+
 - Linux scans use a native walker (`getdents64` + `statx`) with its own worker pool instead of
   `dua-core`. A whole-volume scan of a 4.2M-entry XFS filesystem went from 2.9s to 0.7s in the
   app's load path, and the traversal alone from 2.3s to 0.5s. `dua-core`'s walk stopped scaling

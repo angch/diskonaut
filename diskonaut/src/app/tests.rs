@@ -4,7 +4,7 @@ use ::std::io::Write;
 use ::std::path::{Path, PathBuf};
 use ::std::sync::mpsc;
 
-use libdiskonaut::{DirEntries, NamedEntry, ScanOptions, scan_directories};
+use libdiskonaut::{DirEntries, ScanOptions, scan_directories};
 use ratatui::backend::TestBackend;
 
 use super::{App, UiMode};
@@ -100,19 +100,17 @@ fn prompt_file_deletion_shows_confirmation() {
         Keybinds::default(),
     );
     let meta = fs::metadata(&target).expect("metadata");
-    app.add_scanned_directories(vec![DirEntries {
-        path: std::sync::Arc::from(dir.as_path()),
-        entries: vec![NamedEntry {
-            name: OsStr::new("remove_me.txt").to_os_string(),
-            meta: libdiskonaut::EntryMeta {
-                size: meta.len(),
-                links: 1,
-                is_dir: false,
-                ..libdiskonaut::EntryMeta::default()
-            },
-        }],
-        failed: 0,
-    }]);
+    let mut scanned = DirEntries::new(std::sync::Arc::from(dir.as_path()));
+    scanned.push(
+        OsStr::new("remove_me.txt"),
+        libdiskonaut::EntryMeta {
+            size: meta.len(),
+            links: 1,
+            is_dir: false,
+            ..libdiskonaut::EntryMeta::default()
+        },
+    );
+    app.add_scanned_directories(vec![scanned]);
     app.start_ui();
     let file_index = app
         .board

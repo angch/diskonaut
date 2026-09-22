@@ -2,9 +2,7 @@ use ::std::fs::File;
 use ::std::io::Write;
 use ::std::path::PathBuf;
 
-use super::{
-    EntryMeta, NamedEntry, ScanItem, ScanOptions, scan_directories, scan_folder, scan_into_tree,
-};
+use super::{EntryMeta, ScanItem, ScanOptions, scan_directories, scan_folder, scan_into_tree};
 
 fn temp_scan_dir(name: &str) -> PathBuf {
     let dir = std::env::temp_dir().join(format!("diskonaut_scan_test_{name}"));
@@ -86,10 +84,11 @@ fn scan_directories_groups_entries_by_directory() {
     let mut named: Vec<_> = scan_directories(&dir, options)
         .flat_map(|directory| {
             let parent = directory.path.to_path_buf();
-            directory
-                .entries
-                .into_iter()
-                .map(move |entry| parent.join(&entry.name))
+            let names: Vec<_> = directory
+                .iter()
+                .map(|(name, _)| parent.join(name))
+                .collect();
+            names.into_iter()
         })
         .collect();
     named.sort();
@@ -166,10 +165,11 @@ fn collect_paths(
     scan_directories(dir, options)
         .flat_map(|directory| {
             let parent = directory.path.to_path_buf();
-            directory
-                .entries
-                .into_iter()
-                .map(move |entry| parent.join(&entry.name))
+            let names: Vec<_> = directory
+                .iter()
+                .map(|(name, _)| parent.join(name))
+                .collect();
+            names.into_iter()
         })
         .collect()
 }
@@ -180,12 +180,7 @@ fn scan_directories_reports_every_entry_exactly_once() {
     let mut seen = Vec::new();
     for directory in scan_directories(&dir, ScanOptions::default()) {
         let parent = directory.path.to_path_buf();
-        seen.extend(
-            directory
-                .entries
-                .iter()
-                .map(|entry| parent.join(&entry.name)),
-        );
+        seen.extend(directory.iter().map(|(name, _)| parent.join(name)));
     }
     let unique: std::collections::BTreeSet<_> = seen.iter().cloned().collect();
     assert_eq!(unique, expected, "wrong set of entries");
@@ -205,12 +200,7 @@ fn fallback_grouping_reports_every_entry_exactly_once() {
     let mut seen = Vec::new();
     for directory in super::fallback::group_by_directory(&dir, ScanOptions::default()) {
         let parent = directory.path.to_path_buf();
-        seen.extend(
-            directory
-                .entries
-                .iter()
-                .map(|entry| parent.join(&entry.name)),
-        );
+        seen.extend(directory.iter().map(|(name, _)| parent.join(name)));
     }
     let unique: std::collections::BTreeSet<_> = seen.iter().cloned().collect();
     assert_eq!(unique, expected, "wrong set of entries");
@@ -237,10 +227,11 @@ fn both_walkers_agree_on_the_same_tree() {
         super::fallback::group_by_directory(&dir, options)
             .flat_map(|directory| {
                 let parent = directory.path.to_path_buf();
-                directory
-                    .entries
-                    .into_iter()
-                    .map(move |entry| parent.join(&entry.name))
+                let names: Vec<_> = directory
+                    .iter()
+                    .map(|(name, _)| parent.join(name))
+                    .collect();
+                names.into_iter()
             })
             .collect();
 
@@ -260,18 +251,19 @@ fn both_walkers_agree_on_the_same_tree() {
 fn entries_outside_the_scan_root_are_ignored() {
     let dir = temp_scan_dir("outside_root");
     let mut tree = crate::FileTree::new(crate::Folder::new(&dir), dir.clone());
-    tree.add_dir_entries(
-        std::path::Path::new("/somewhere/else"),
-        vec![NamedEntry {
-            name: "intruder".into(),
-            meta: EntryMeta {
-                size: 4096,
-                links: 1,
-                is_dir: false,
-                ..EntryMeta::default()
-            },
-        }],
+    let mut outside = crate::DirEntries::new(std::sync::Arc::from(std::path::Path::new(
+        "/somewhere/else",
+    )));
+    outside.push(
+        std::ffi::OsStr::new("intruder"),
+        EntryMeta {
+            size: 4096,
+            links: 1,
+            is_dir: false,
+            ..EntryMeta::default()
+        },
     );
+    tree.add_dir_entries(outside);
     assert_eq!(tree.get_total_size(), 0);
     assert_eq!(tree.get_total_descendants(), 0);
 
@@ -506,8 +498,8 @@ mod linux_walker {
             let groups = walk(&root, threads, ScanOptions::default());
             let mut seen: HashMap<PathBuf, usize> = HashMap::new();
             for group in &groups {
-                for entry in &group.entries {
-                    *seen.entry(group.path.join(&entry.name)).or_default() += 1;
+                for (name, _) in group.iter() {
+                    *seen.entry(group.path.join(name)).or_default() += 1;
                 }
             }
             assert_eq!(
@@ -586,11 +578,11 @@ mod linux_walker {
         assert_eq!(groups.len(), 4, "the symlink is not descended into");
         let linked = groups
             .iter()
-            .flat_map(|group| &group.entries)
-            .find(|entry| entry.name == "loop")
+            .flat_map(crate::scan::DirEntries::iter)
+            .find(|(name, _)| *name == "loop")
             .expect("the symlink is still reported as an entry");
         assert!(
-            !linked.meta.is_dir,
+            !linked.1.is_dir,
             "a symlink to a directory is not a directory"
         );
         let _ = std::fs::remove_dir_all(&root);

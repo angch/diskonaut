@@ -21,10 +21,30 @@ use ::std::sync::mpsc::{Receiver, SyncSender, sync_channel};
 use ::std::sync::{Arc, Condvar, Mutex, PoisonError};
 use ::std::thread;
 
-use crate::scan::{DirEntries, EntryMeta, NamedEntry};
+use crate::scan::{DirEntries, EntryMeta};
 
 /// An entry inside a directory, named relative to it.
-pub type BulkEntry = NamedEntry;
+///
+/// `DirEntries` packs its names into one buffer, but this walker collects entries before it knows
+/// it has a whole directory — a record can send it back to the `readdir` fallback part-way. So it
+/// keeps names owned here and packs them where a `DirEntries` is built, which costs one copy per
+/// entry on macOS and leaves the Linux walker's allocation-free path intact.
+#[derive(Debug)]
+pub struct BulkEntry {
+    pub name: OsString,
+    pub meta: EntryMeta,
+}
+
+/// Collect owned entries into the packed form the rest of the scan expects.
+fn packed(path: &Path, entries: Vec<BulkEntry>, failed: u64) -> DirEntries {
+    let name_bytes = entries.iter().map(|entry| entry.name.len()).sum();
+    let mut directory = DirEntries::with_capacity(Arc::from(path), entries.len(), name_bytes);
+    for entry in entries {
+        directory.push(&entry.name, entry.meta);
+    }
+    directory.failed = failed;
+    directory
+}
 
 /// Darwin vnode type for a directory (`<sys/vnode.h>`, absent from `libc`).
 const VDIR: u32 = 2;
@@ -349,11 +369,7 @@ fn read_dir_bulk(
     }
 
     Ok(DirRead {
-        entries: DirEntries {
-            path: Arc::from(path),
-            entries,
-            failed,
-        },
+        entries: packed(path, entries, failed),
         inode,
         device,
         listed,
@@ -403,11 +419,7 @@ fn read_dir_stat(path: &Path, apparent_size: bool, inode: u64, device: u64) -> i
     }
 
     Ok(DirRead {
-        entries: DirEntries {
-            path: Arc::from(path),
-            entries,
-            failed,
-        },
+        entries: packed(path, entries, failed),
         inode,
         device,
         listed,
@@ -564,12 +576,11 @@ pub fn walk_bulk(
                                 }
                                 let children = if max_depth.is_none_or(|max| job.depth + 1 < max) {
                                     read.entries
-                                        .entries
                                         .iter()
                                         .zip(&read.listed)
-                                        .filter(|(entry, _)| entry.meta.is_dir)
-                                        .map(|(entry, listed)| Job {
-                                            path: read.entries.path.join(&entry.name),
+                                        .filter(|((_, meta), _)| meta.is_dir)
+                                        .map(|((name, _), listed)| Job {
+                                            path: read.entries.path.join(name),
                                             depth: job.depth + 1,
                                             listed_inode: listed.inode,
                                             firmlink: listed.firmlink,
@@ -584,13 +595,9 @@ pub fn walk_bulk(
                                 queue.push_all(children);
                             }
                             Err(_) => {
-                                stop = sender
-                                    .send(DirEntries {
-                                        path: Arc::from(job.path.as_path()),
-                                        entries: Vec::new(),
-                                        failed: 1,
-                                    })
-                                    .is_err();
+                                let mut unreadable = DirEntries::new(Arc::from(job.path.as_path()));
+                                unreadable.failed = 1;
+                                stop = sender.send(unreadable).is_err();
                             }
                         }
                         queue.finish();
@@ -798,8 +805,13 @@ mod tests {
         ::std::fs::write(mount.join("nested/b.bin"), vec![0u8; 24 * 1024]).expect("write b.bin");
 
         let total: u64 = walk_bulk(&mount, 2, false, None, false)
-            .flat_map(|directory| directory.entries)
-            .map(|entry| entry.meta.size)
+            .flat_map(|directory| {
+                directory
+                    .entries()
+                    .iter()
+                    .map(|entry| entry.meta.size)
+                    .collect::<Vec<_>>()
+            })
             .sum();
 
         assert!(

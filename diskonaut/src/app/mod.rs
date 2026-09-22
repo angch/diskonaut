@@ -4,6 +4,8 @@ use ::std::mem::ManuallyDrop;
 use ::std::path::PathBuf;
 use ::std::sync::mpsc::{Receiver, SyncSender};
 
+use ::std::sync::Arc;
+
 use libdiskonaut::tiles::Board;
 use libdiskonaut::{DirEntries, FileOrFolder, FileToDelete, FileTree, Folder};
 
@@ -118,9 +120,8 @@ where
         let mut last_path = None;
         for directory in directories {
             failed += directory.failed;
-            self.file_tree
-                .add_dir_entries(&directory.path, directory.entries);
-            last_path = Some(directory.path);
+            last_path = Some(Arc::clone(&directory.path));
+            self.file_tree.add_dir_entries(directory);
         }
         self.file_tree.failed_to_read += failed;
         if let Some(path) = last_path {

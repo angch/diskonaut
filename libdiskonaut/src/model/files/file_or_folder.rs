@@ -1,5 +1,6 @@
 use ::std::collections::VecDeque;
 use ::std::ffi::{OsStr, OsString};
+use ::std::os::unix::ffi::OsStrExt;
 use ::std::path::{Path, PathBuf};
 
 use crate::scan::{EntryMeta, NamedEntry};
@@ -8,7 +9,7 @@ use crate::scan::{EntryMeta, NamedEntry};
 ///
 /// A `Folder` is boxed so that the far more numerous files do not each pay for a folder's size:
 /// the map slot for a file is a name and a size rather than a name and an entire folder.
-pub type ContentsMap = super::hash::FastMap<OsString, FileOrFolder>;
+pub type ContentsMap = super::Contents;
 
 #[derive(Debug, Clone)]
 pub enum FileOrFolder {
@@ -82,29 +83,22 @@ impl Folder {
             folder.size += size;
             folder.num_descendants += 1;
             if components.peek().is_some() {
-                if !folder.contents.contains_key(name) {
-                    folder.contents.insert(
-                        name.to_os_string(),
-                        FileOrFolder::Folder(Box::new(Folder::from(name.to_os_string()))),
-                    );
-                }
+                folder.contents.insert_if_absent(name, || {
+                    FileOrFolder::Folder(Box::new(Folder::from(name.to_os_string())))
+                });
                 folder = match folder.contents.get_mut(name) {
                     Some(FileOrFolder::Folder(folder)) => folder,
                     _ => unreachable!("got a file in the middle of a path"),
                 };
             } else if meta.is_dir {
                 // A directory can already exist here if one of its children was reported first.
-                if !folder.contents.contains_key(name) {
-                    folder.contents.insert(
-                        name.to_os_string(),
-                        FileOrFolder::Folder(Box::new(Folder::from(name.to_os_string()))),
-                    );
-                }
+                folder.contents.insert_if_absent(name, || {
+                    FileOrFolder::Folder(Box::new(Folder::from(name.to_os_string())))
+                });
             } else {
-                folder.contents.insert(
-                    name.to_os_string(),
-                    FileOrFolder::File(File { size: meta.size }),
-                );
+                folder
+                    .contents
+                    .insert(name, FileOrFolder::File(File { size: meta.size }));
             }
         }
     }
@@ -117,6 +111,7 @@ impl Folder {
     pub fn add_dir_entries<'a>(
         &mut self,
         dir_path: impl Iterator<Item = &'a OsStr>,
+        names: Vec<u8>,
         entries: Vec<NamedEntry>,
         size_at_depth: &[u128],
     ) {
@@ -127,12 +122,9 @@ impl Folder {
         folder.size += size_at(0);
         folder.num_descendants += contained_count;
         for (depth, name) in dir_path.enumerate() {
-            if !folder.contents.contains_key(name) {
-                folder.contents.insert(
-                    name.to_os_string(),
-                    FileOrFolder::Folder(Box::new(Folder::from(name.to_os_string()))),
-                );
-            }
+            folder.contents.insert_if_absent(name, || {
+                FileOrFolder::Folder(Box::new(Folder::from(name.to_os_string())))
+            });
             folder = match folder.contents.get_mut(name) {
                 Some(FileOrFolder::Folder(next)) => next,
                 _ => unreachable!("got a file in the middle of a path"),
@@ -141,22 +133,33 @@ impl Folder {
             folder.num_descendants += contained_count;
         }
 
+        // The scan packed these names once; the folder takes that buffer rather than copying each
+        // name out of it, so an entry's name is never allocated between the kernel and the tree.
+        let shift = folder.contents.absorb_names(names);
         folder.contents.reserve(entries.len());
         for entry in entries {
+            let range = entry.name_range();
+            let offset = shift + u32::try_from(range.start).expect("names fit in 4 GiB");
+            let len = u32::try_from(range.len()).expect("a name fits in 4 GiB");
             if entry.meta.is_dir {
-                // The directory may already be here if its own contents were read first.
-                if let ::std::collections::hash_map::Entry::Vacant(slot) =
-                    folder.contents.entry(entry.name)
-                {
-                    let name = slot.key().clone();
-                    slot.insert(FileOrFolder::Folder(Box::new(Folder::from(name))));
-                }
+                // The directory may already be here if its own contents were read first, which is
+                // the only case that has to look before it writes.
+                let folder_name =
+                    OsStr::from_bytes(folder.contents.names_at(offset, len)).to_os_string();
+                folder.contents.place(
+                    offset,
+                    len,
+                    FileOrFolder::Folder(Box::new(Folder::from(folder_name))),
+                    true,
+                );
             } else {
-                folder.contents.insert(
-                    entry.name,
+                folder.contents.place(
+                    offset,
+                    len,
                     FileOrFolder::File(File {
                         size: entry.meta.size,
                     }),
+                    false,
                 );
             }
         }

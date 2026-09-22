@@ -2,7 +2,9 @@ use ::std::ffi::{OsStr, OsString};
 use ::std::path::{Component, Path, PathBuf};
 
 use crate::model::{FileOrFolder, FileToDelete, Folder, HardLinks};
-use crate::scan::{EntryMeta, NamedEntry};
+use ::std::sync::Arc;
+
+use crate::scan::{DirEntries, EntryMeta, NamedEntry};
 
 pub struct FileTree {
     pub current_folder_names: Vec<OsString>,
@@ -86,13 +88,14 @@ impl FileTree {
     ///
     /// Resolving `dir_path` is O(depth), and doing it once for the whole directory rather than
     /// once per entry is what keeps tree building off the critical path of a fast walk.
-    pub fn add_dir_entries(&mut self, dir_path: &Path, entries: Vec<NamedEntry>) {
+    pub fn add_dir_entries(&mut self, directory: DirEntries) {
+        let (dir_path, names, entries) = directory.into_parts();
         // A directory from outside the scanned tree has no place in it. Silently folding such a
         // path into the base folder, as skipping a component count would, invents entries.
         let Ok(relative) = dir_path.strip_prefix(&self.path_in_filesystem) else {
             return;
         };
-        self.add_relative_dir_entries(relative, entries);
+        self.add_relative_dir_entries(relative, names, entries);
     }
     pub fn add_entry(&mut self, meta: EntryMeta, entry_full_path: &Path) {
         let Ok(relative) = entry_full_path.strip_prefix(&self.path_in_filesystem) else {
@@ -102,18 +105,22 @@ impl FileTree {
             // The scan root itself, which is not an entry inside the tree.
             return;
         };
-        let single = vec![NamedEntry {
-            name: name.to_os_string(),
-            meta,
-        }];
-        self.add_relative_dir_entries(parent, single);
+        let mut single = DirEntries::new(Arc::from(parent));
+        single.push(name, meta);
+        let (_, names, entries) = single.into_parts();
+        self.add_relative_dir_entries(parent, names, entries);
     }
     /// Add one directory's entries, given that directory's path relative to the scan root.
     ///
     /// A hard-linked file is charged only to the folders that have not already counted it, which
     /// is what makes each folder's size the space actually held beneath it rather than the sum of
     /// its entries. See [`HardLinks`].
-    fn add_relative_dir_entries(&mut self, relative_dir: &Path, entries: Vec<NamedEntry>) {
+    fn add_relative_dir_entries(
+        &mut self,
+        relative_dir: &Path,
+        names: Vec<u8>,
+        entries: Vec<NamedEntry>,
+    ) {
         let depth = relative_dir.components().count();
         let Self {
             base_folder,
@@ -151,6 +158,7 @@ impl FileTree {
 
         base_folder.add_dir_entries(
             relative_dir.components().map(Component::as_os_str),
+            names,
             entries,
             size_at_depth,
         );
