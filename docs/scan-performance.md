@@ -1557,6 +1557,88 @@ not a result.
   would. If ZFS support is ever taken seriously, `.zfs` belongs in the same category as `/proc`.
 
 
+## The memory model (2026-09-22)
+
+With the walk at 0.43s and the tree build at ~0.70s, the model is what the scan waits for. This is
+what came of attacking it. One change shipped; three did not, and the three are the more useful
+half of the record.
+
+### The budget, first
+
+`pipeline ~= max(walk, model)`, and the walk is 0.43s. So a model faster than ~0.43s buys nothing
+end to end:
+
+| model | 0.70s | 0.55s | 0.43s | 0.20s |
+| --- | --- | --- | --- | --- |
+| pipeline | 0.73s | ~0.58s | ~0.46s | ~0.46s |
+
+There is about 0.3s worth taking and no more. **Memory is the axis with no such ceiling** — 824 MB
+for 4.2M entries is ~193 bytes each, and a 10M-entry volume would want 2 GB.
+
+### What worked: a file's size is a `u64`
+
+`File::size` was a `u128`. It is the most repeated field in the model and, being the larger variant,
+it set the size of `FileOrFolder` — which is what every slot in every folder costs. 24 bytes became
+16.
+
+| | before | after |
+| --- | --- | --- |
+| peak RSS | 824 MB | **654 MB** (−21%) |
+| `tree` | 0.73s | **0.68s** |
+
+A `u64` counts to 16 EiB. The range was never doing anything.
+
+### What did not work, and why
+
+**A `Vec` per folder instead of a hash map.** The reasoning was good and the measurement refused
+it. Directories are tiny — median 3 entries, mean 11, p99 120 — so hashing a name to place three
+items looked like waste, and a `hashbrown` table rounds its allocation up however few things go in.
+Measured: `tree` 0.73s → 0.75–0.79s and RSS 824 MB → **881 MB**, worse on both. Removing the
+duplicate check on insert recovered the time to level but no better. The conclusion is worth
+keeping: **with a word-at-a-time hasher and SIMD probing, hashbrown is already at the speed of a
+linear scan over three names**, and exact-sized `Vec`s lose the memory argument once a folder is
+filled incrementally and doubles.
+
+**Packing every folder's names into one buffer.** The measured shape said this should be the big
+one: the mean name is 32 bytes, so an `OsString` costs ~24 bytes inline plus a ~48-byte heap block,
+about 305 MB of the tree in 4.2M scattered allocations. Replacing that with one buffer per folder
+and `(u32 offset, u32 len)` per entry predicted ~430 MB.
+
+It delivered `tree` 0.68s → **0.85s** and RSS 654 MB → **642 MB**: 25% slower to save 2%.
+
+The diagnosis is the useful part, and it is not that the idea is wrong — it is that **interning
+inside the model cannot move the number the model does not set.** Peak RSS is reached while the
+scan is in flight, and the walk allocates an `OsString` per entry regardless; packing them a second
+time in the consumer *adds* a copy while the originals are still live in the channel. The only
+place the allocation can be removed is where it is made.
+
+**mimalloc.** Testing whether the model's cost is glibc arena contention — 24 threads allocating,
+one thread freeing, the pattern glibc handles worst. Two to three times worse on every stage.
+
+### What would actually work
+
+Carry the packed names in `DirEntries` rather than rebuilding them in the model: the walker already
+reads a directory's names out of one `getdents64` buffer, so it can copy them into a single
+`Vec<u8>` and hand it over with offsets instead of allocating an `OsString` each. The model then
+*moves* that buffer into the folder — no per-entry allocation anywhere, and no copy at all in the
+common case where the folder is new.
+
+That is the version worth doing, and it was not done here because it changes `NamedEntry`, which
+means restructuring `scan/bulk.rs` — macOS-only, `cfg`'d out on Linux, and therefore uncompilable
+from this machine. Reshaping a type blind is exactly the trap finding #7 records; adding one field
+blind was already at the edge of reasonable.
+
+Measurements for whoever picks it up, so none of it has to be re-derived:
+
+| | |
+| --- | --- |
+| entries | 4,232,419 |
+| mean name length | 32.1 bytes |
+| total name content | 129.6 MB |
+| directory fan-out | median 3, mean 11.2, p90 13, p99 120, max 43,009 |
+| tree after the `u64` change | ~0.68s, 654 MB (~155 bytes/entry) |
+
+
 ## Known gaps
 
 - The reported total for `/` is ~706 GiB against 884 GiB used. The difference is APFS snapshots,
