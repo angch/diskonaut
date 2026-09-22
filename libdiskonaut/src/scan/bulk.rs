@@ -9,9 +9,10 @@
 //! Entries are delivered one directory at a time. A whole directory shares a parent path, so the
 //! consumer resolves that parent once instead of re-parsing a full path per file.
 
+use ::std::collections::HashMap;
 use ::std::ffi::OsString;
 use ::std::io;
-use ::std::os::fd::{AsRawFd, OwnedFd};
+use ::std::os::fd::{AsRawFd, OwnedFd, RawFd};
 use ::std::os::unix::ffi::OsStringExt;
 use ::std::os::unix::fs::OpenOptionsExt;
 use ::std::path::{Path, PathBuf};
@@ -67,7 +68,7 @@ impl<'a> Cursor<'a> {
 ///
 /// `ATTR_FILE_*` attributes apply only to non-directories and are left out of a directory's record
 /// altogether, which is why the returned bitmap has to be consulted before reading the size.
-fn requested_attributes(apparent_size: bool) -> libc::attrlist {
+fn requested_attributes(size_attribute: libc::attrgroup_t) -> libc::attrlist {
     libc::attrlist {
         bitmapcount: libc::ATTR_BIT_MAP_COUNT,
         reserved: 0,
@@ -79,18 +80,72 @@ fn requested_attributes(apparent_size: bool) -> libc::attrlist {
             | libc::ATTR_CMN_FILEID,
         volattr: 0,
         dirattr: 0,
-        fileattr: libc::ATTR_FILE_LINKCOUNT | size_attribute(apparent_size),
+        fileattr: libc::ATTR_FILE_LINKCOUNT | size_attribute,
         forkattr: 0,
     }
 }
 
-/// Which size the scan asks for; the other one is not requested at all.
-fn size_attribute(apparent_size: bool) -> libc::attrgroup_t {
-    if apparent_size {
-        libc::ATTR_FILE_DATALENGTH
-    } else {
-        libc::ATTR_FILE_ALLOCSIZE
+/// Which size the scan asks for, decided per filesystem; the other one is not requested at all.
+///
+/// macOS's `msdosfs` sets the `ATTR_FILE_ALLOCSIZE` bit in a record's returned-attributes bitmap
+/// and then packs the value as zero, so on a FAT12/16/32 volume every file reads as empty and the
+/// whole scan totals nothing. The bitmap claims the attribute is present, so [`parse_record`]
+/// cannot tell the difference, and the [`REQUIRED_COMMON`] guard does not cover file attributes.
+///
+/// There is no allocated size to recover on such a volume: `msdosfs` reports `f_bsize` as 512
+/// rather than the cluster size and `st_blocks` as `ceil(size / 512)`, so neither `statfs` nor
+/// `lstat` knows the real allocation either. The data length is the closest honest answer, and is
+/// what an `--apparent-size` scan of the same volume already reports. exFAT vends a true
+/// allocation size and is left alone.
+struct SizeAttribute {
+    /// The scan asked for apparent size, so the data length is requested regardless.
+    apparent: bool,
+    /// What each filesystem seen so far turned out to need, keyed by device.
+    per_device: HashMap<u64, libc::attrgroup_t>,
+}
+
+impl SizeAttribute {
+    fn new(apparent: bool) -> Self {
+        Self {
+            apparent,
+            per_device: HashMap::new(),
+        }
     }
+
+    /// The attribute to request for entries of the directory open on `fd`, which lives on `device`.
+    ///
+    /// The filesystem is identified once per device rather than once per directory: a scan can
+    /// span a FAT stick and an APFS disk, so one answer for the whole walk would be wrong, but an
+    /// `fstatfs` per directory would be paid everywhere to catch a rare case.
+    fn for_device(&mut self, fd: RawFd, device: u64) -> libc::attrgroup_t {
+        if self.apparent {
+            return libc::ATTR_FILE_DATALENGTH;
+        }
+        *self.per_device.entry(device).or_insert_with(|| {
+            if is_msdos(fd) {
+                libc::ATTR_FILE_DATALENGTH
+            } else {
+                libc::ATTR_FILE_ALLOCSIZE
+            }
+        })
+    }
+}
+
+/// Whether the filesystem behind `fd` is the macOS FAT driver, whose `ATTR_FILE_ALLOCSIZE` is zero.
+fn is_msdos(fd: RawFd) -> bool {
+    let mut status = std::mem::MaybeUninit::<libc::statfs>::uninit();
+    // SAFETY: the descriptor is owned and open, and `status` is a writable `statfs` allocation.
+    if unsafe { libc::fstatfs(fd, status.as_mut_ptr()) } != 0 {
+        return false;
+    }
+    // SAFETY: `fstatfs` returning zero means it initialized the structure.
+    let status = unsafe { status.assume_init() };
+    status
+        .f_fstypename
+        .iter()
+        .take_while(|character| **character != 0)
+        .map(|character| *character as u8)
+        .eq(b"msdos".iter().copied())
 }
 
 /// Attributes every record must carry for the fixed-layout parse above to be valid.
@@ -207,7 +262,7 @@ struct ListedAs {
 /// Enumerate one directory.
 fn read_dir_bulk(
     path: &Path,
-    apparent_size: bool,
+    size: &mut SizeAttribute,
     buffer: &mut AlignedBuffer,
 ) -> io::Result<DirRead> {
     let directory: OwnedFd = ::std::fs::OpenOptions::new()
@@ -229,12 +284,12 @@ fn read_dir_bulk(
         (status.st_ino, status.st_dev as u64)
     };
 
-    let size_attribute = size_attribute(apparent_size);
+    let size_attribute = size.for_device(directory.as_raw_fd(), device);
     let mut entries = Vec::new();
     let mut listed = Vec::new();
     let mut failed = 0u64;
     loop {
-        let mut attributes = requested_attributes(apparent_size);
+        let mut attributes = requested_attributes(size_attribute);
         // SAFETY: the descriptor is owned and open, `attributes` is a valid initialized attrlist,
         // and the buffer is writable, eight-byte aligned, and described by its own length.
         let count = unsafe {
@@ -274,7 +329,7 @@ fn read_dir_bulk(
                 && record_common_attributes(&buffer.0[offset..offset + length])
                     .is_none_or(|returned| returned & REQUIRED_COMMON != REQUIRED_COMMON)
             {
-                return read_dir_stat(path, apparent_size, inode, device);
+                return read_dir_stat(path, size.apparent, inode, device);
             }
             match parse_record(&buffer.0[offset..offset + length], size_attribute) {
                 Some(record) => {
@@ -478,6 +533,7 @@ pub fn walk_bulk(
                 .name("bulk_scanner".to_string())
                 .spawn(move || {
                     let mut buffer = AlignedBuffer([0; BUFFER_BYTES]);
+                    let mut size = SizeAttribute::new(apparent_size);
                     while let Some(job) = queue.pop() {
                         // `dua-core` descends into a directory entry whose own depth is below the
                         // limit; a job's depth is that same depth, so the test matches it. Only
@@ -487,7 +543,7 @@ pub fn walk_bulk(
                             continue;
                         }
                         let stop;
-                        match read_dir_bulk(&job.path, apparent_size, &mut buffer) {
+                        match read_dir_bulk(&job.path, &mut size, &mut buffer) {
                             Ok(read) => {
                                 // A directory whose opened inode differs from the one its parent
                                 // listed has something mounted over it.
@@ -585,5 +641,168 @@ impl Drop for BulkWalk {
         // top of its loop and see that the walk has been abandoned.
         while self.receiver.recv().is_ok() {}
         self.join();
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{SizeAttribute, walk_bulk};
+    use ::std::os::fd::AsRawFd;
+    use ::std::path::{Path, PathBuf};
+    use ::std::process::Command;
+
+    /// The mount point `hdiutil attach` reported for the partition that actually mounted.
+    ///
+    /// The output is three tab-separated columns and only a mounted partition fills the third, so
+    /// all three are required: matching on "the last field starting with a slash" would accept the
+    /// device node from the untabbed scheme line.
+    fn mount_point(output: &[u8]) -> Option<PathBuf> {
+        ::std::str::from_utf8(output)
+            .ok()?
+            .lines()
+            .find_map(|line| {
+                let mut fields = line.split('\t');
+                let device = fields.next()?.trim();
+                let _scheme = fields.next()?;
+                let mount = fields.next()?.trim();
+                (device.starts_with("/dev/") && mount.starts_with('/'))
+                    .then(|| PathBuf::from(mount))
+            })
+    }
+
+    /// The disk `hdiutil attach` opened, which exists even when nothing mounted.
+    fn attached_device(output: &[u8]) -> Option<String> {
+        ::std::str::from_utf8(output)
+            .ok()?
+            .split_whitespace()
+            .find(|token| token.starts_with("/dev/disk"))
+            .map(str::to_string)
+    }
+
+    /// Detaches the image and deletes it however the test ends.
+    ///
+    /// Without this a panic between attaching and detaching leaves the volume mounted, which is
+    /// exactly what happened while this test was being written.
+    struct Attached {
+        device: String,
+        image: PathBuf,
+    }
+
+    impl Drop for Attached {
+        fn drop(&mut self) {
+            let _ = Command::new("hdiutil")
+                .arg("detach")
+                .arg(&self.device)
+                .output();
+            let _ = ::std::fs::remove_file(&self.image);
+        }
+    }
+
+    /// Open a directory the way [`super::read_dir_bulk`] does, for the device it reports.
+    fn open_dir(path: &Path) -> (::std::fs::File, u64) {
+        use ::std::os::unix::fs::{MetadataExt, OpenOptionsExt};
+        let file = ::std::fs::OpenOptions::new()
+            .read(true)
+            .custom_flags(libc::O_DIRECTORY)
+            .open(path)
+            .expect("open directory");
+        let device = file.metadata().expect("stat directory").dev();
+        (file, device)
+    }
+
+    #[test]
+    fn apparent_size_always_asks_for_the_data_length() {
+        let (directory, device) = open_dir(&::std::env::temp_dir());
+        let mut size = SizeAttribute::new(true);
+        assert_eq!(
+            size.for_device(directory.as_raw_fd(), device),
+            libc::ATTR_FILE_DATALENGTH
+        );
+        // Nothing is probed, so no filesystem is remembered.
+        assert!(size.per_device.is_empty());
+    }
+
+    #[test]
+    fn an_ordinary_filesystem_asks_for_the_allocated_size() {
+        let (directory, device) = open_dir(&::std::env::temp_dir());
+        let mut size = SizeAttribute::new(false);
+        assert_eq!(
+            size.for_device(directory.as_raw_fd(), device),
+            libc::ATTR_FILE_ALLOCSIZE
+        );
+        // The answer is cached per device, so a second directory on it costs no `fstatfs`.
+        assert_eq!(size.per_device.len(), 1);
+        assert_eq!(
+            size.for_device(directory.as_raw_fd(), device),
+            libc::ATTR_FILE_ALLOCSIZE
+        );
+        assert_eq!(size.per_device.len(), 1);
+    }
+
+    /// A FAT32 volume, created and mounted for the test, must not scan as empty.
+    ///
+    /// Nothing synthetic reproduces this: `msdosfs` sets the `ATTR_FILE_ALLOCSIZE` bit in the
+    /// returned-attributes bitmap and packs the value as zero, so a hand-built record either
+    /// carries the attribute or does not, and neither case is the one that broke. Only the real
+    /// driver lies this way.
+    ///
+    /// Ignored by default because it creates and mounts a disk image, which CI does not do:
+    /// `cargo test -p libdiskonaut --lib -- --ignored fat32`.
+    #[test]
+    #[ignore = "creates and mounts a FAT32 disk image with hdiutil"]
+    fn a_fat32_volume_does_not_scan_as_empty() {
+        let image = ::std::env::temp_dir().join("diskonaut_fat32_test.dmg");
+        let _ = ::std::fs::remove_file(&image);
+
+        let created = Command::new("hdiutil")
+            .args([
+                "create",
+                "-size",
+                "64m",
+                "-fs",
+                "MS-DOS FAT32",
+                "-volname",
+                "DSKNAUT",
+            ])
+            .arg(&image)
+            .output()
+            .expect("run hdiutil create");
+        assert!(
+            created.status.success(),
+            "hdiutil create failed: {created:?}"
+        );
+        let attached = Command::new("hdiutil")
+            .arg("attach")
+            .arg(&image)
+            .output()
+            .expect("run hdiutil attach");
+        assert!(
+            attached.status.success(),
+            "hdiutil attach failed: {attached:?}"
+        );
+        // Registered before anything that can panic, so the volume is detached either way.
+        let _attached = Attached {
+            device: attached_device(&attached.stdout).expect("hdiutil attach reported a disk"),
+            image: image.clone(),
+        };
+        // Read the mount point back rather than assuming it: a FAT label longer than eleven
+        // characters is silently replaced with "NO NAME", so a name-derived path can be wrong.
+        let mount = mount_point(&attached.stdout).expect("hdiutil attach reported a mount point");
+
+        ::std::fs::write(mount.join("a.bin"), vec![0u8; 40 * 1024]).expect("write a.bin");
+        ::std::fs::create_dir(mount.join("nested")).expect("create nested");
+        ::std::fs::write(mount.join("nested/b.bin"), vec![0u8; 24 * 1024]).expect("write b.bin");
+
+        let total: u64 = walk_bulk(&mount, 2, false, None, false)
+            .flat_map(|directory| directory.entries)
+            .map(|entry| entry.meta.size)
+            .sum();
+
+        assert!(
+            total >= 64 * 1024,
+            "FAT32 volume scanned as {total} bytes; the two files hold 64 KiB. \
+             `msdosfs` reports ATTR_FILE_ALLOCSIZE as zero while claiming to return it, \
+             so the walk must fall back to ATTR_FILE_DATALENGTH there."
+        );
     }
 }

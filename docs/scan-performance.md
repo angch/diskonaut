@@ -557,6 +557,88 @@ Two things noticed and left alone, for whoever picks the walker up next:
   3.0s, 6 through 16 threads all within 2.2–2.9s of each other, with run-to-run noise of ±0.3s.
   The cap of 8 is not wrong here, and there is no better number to replace it with.
 
+## FAT: vfat, msdos and exFAT
+
+### The bug: FAT32 on macOS scanned as entirely empty
+
+`msdosfs` **sets the `ATTR_FILE_ALLOCSIZE` bit in a record's returned-attributes bitmap and then
+packs the value as zero.** The bitmap says the attribute is there, so the `returned_file &
+size_attribute != 0` check in `parse_record` passes and reads a legitimate-looking `0`. Every file
+on a FAT12/16/32 volume therefore had size zero, the treemap was blank, and nothing said so.
+`--apparent-size` was the only working mode, since it asks for `ATTR_FILE_DATALENGTH` instead.
+
+Measured on a 200 MB FAT32 image, before the fix:
+
+```
+FAT32   dua-walk  1683 entries  19.1 MiB     exFAT   walk  44.0 KiB   correct
+        walk      1682 entries   0.0 B       APFS    walk  correct
+        pipeline  1682 entries   0.0 B
+```
+
+A probe requesting all three file attributes at once shows it directly:
+
+```
+FAT32 : returned_file=0x205  linkcount=1  allocsize=0      datalength=5120
+exFAT : returned_file=0x205  linkcount=1  allocsize=8192   datalength=5120
+APFS  : returned_file=0x205  linkcount=1  allocsize=4096   datalength=353
+```
+
+The `REQUIRED_COMMON` guard added in finding 5 does not catch this: it covers *common* attributes
+only, and only checks the first record of the first batch. The comment there guessed exFAT as the
+filesystem at risk; exFAT is in fact fine, and FAT32 is the one that broke. **A filesystem can
+misreport an attribute it claims to return — the bitmap is not a guarantee of the value.**
+
+There is no allocated size to recover on such a volume. `msdosfs` reports `f_bsize` as 512 rather
+than the cluster size, and `st_blocks` as `ceil(size / 512)`, so neither `statfs` nor `lstat` knows
+the real allocation either — rounding the data length up to the cluster size is not available as a
+fix. The data length is the closest honest answer.
+
+`SizeAttribute` in `scan/bulk.rs` now picks the attribute per filesystem, identified by one
+`fstatfs` per *device* (cached, not per directory: a scan can span a FAT stick and an APFS disk, so
+a single answer for the whole walk would be wrong, but probing every directory would tax every
+filesystem to catch a rare one).
+
+### Testing it
+
+`scan::bulk::tests::a_fat32_volume_does_not_scan_as_empty` creates a FAT32 image with `hdiutil`,
+mounts it, scans it and asserts a non-zero total. It is `#[ignore]`d because it mounts a disk image:
+
+```
+cargo test -p libdiskonaut --lib -- --ignored fat32
+```
+
+Nothing synthetic reproduces this. A hand-built record either carries the attribute or does not,
+and neither case is the one that broke; only the real driver claims an attribute and then zeroes
+it. Confirmed to fail (`FAT32 volume scanned as 0 bytes`) with the fix reverted.
+
+The test reads its mount point back from `hdiutil attach` output rather than deriving it from the
+volume name: **a FAT label longer than eleven characters is silently replaced with `NO NAME`**, so
+a name-derived path is wrong for long labels.
+
+### For Linux — unverified, to check when someone has a Linux box
+
+None of the following was tested; it is reasoning from the drivers, recorded so it can be confirmed
+or knocked down rather than rediscovered. Test with a FAT stick and a loopback `mkfs.vfat` image.
+
+- **Sizes should already be right, and should differ from macOS.** Linux's `fat_fill_inode` sets
+  `i_blocks` from the size rounded up to the cluster size, so `st_blocks` is a true allocated size
+  there, unlike macOS. The consequence: **the same stick totals differently on Linux and macOS**,
+  and dramatically so on a 32 KB-cluster FAT32 full of small files. Confirm this rather than
+  letting someone chase it as a bug.
+- **Hard-link accounting is inert, correctly.** FAT has no hard links; `nlink` is always 1, and
+  Linux `vfat` reports 1 for directories too. `HardLinks` never fires. No cost, no risk.
+- **Synthetic inodes are harmless only by accident.** `vfat` derives `st_ino` from directory-entry
+  position and they are not stable across remounts. This is safe today *only* because `links > 1`
+  is never true, so the inode never reaches the dedup map. Anything that later keys a map on inode
+  unconditionally will break here first.
+- **The thread count is the open performance question.** `MAX_SCAN_THREADS = 8` is tuned for APFS
+  on NVMe. FAT serialises FAT-chain traversal and usually lives on slow removable media, so 1–2
+  workers may well beat 8. This was **not** measured: a disk image backed by NVMe does not model a
+  real stick's seek cost, and the test tree scans in 13 ms either way. Needs a real USB stick and a
+  `--threads 1/2/4/8` sweep before the constant is touched.
+- **exFAT on Linux** is a separate driver (`exfat`, not `vfat`) and, like macOS's, is expected to
+  be fine. Worth one confirming run, not more.
+
 ## Known gaps
 
 - The reported total for `/` is ~706 GiB against 884 GiB used. The difference is APFS snapshots,

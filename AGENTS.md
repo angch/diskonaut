@@ -95,6 +95,9 @@ Exiting { app_loaded: bool }
 - **Modal via enum**: `UiMode` variant change = modal open/close; no separate stack.
 - **Config merging**: CLI `--apparent-size` ORs with config file setting.
 - **Graceful degradation**: Read errors counted but scan continues.
+- **Per-filesystem attributes**: a returned-attributes bitmap says an attribute is *present*, not
+  that its value is real. `msdosfs` claims `ATTR_FILE_ALLOCSIZE` and packs zero, so the size
+  attribute is chosen per device. See `docs/scan-performance.md`.
 - **ManuallyDrop on FileTree**: Avoids slow recursive drop on exit.
 
 ---
@@ -148,6 +151,14 @@ Exiting { app_loaded: bool }
 3. Expose via CLI in `diskonaut/src/cli/mod.rs` and config if persistent
 4. Add a `--benchmark` stage if it changes how the walk performs
 
+### Touching filesystem attributes
+Test against FAT as well as APFS — it is the filesystem that misreports. `docs/scan-performance.md`
+has the FAT section, and the volume test is:
+
+```bash
+cargo test -p libdiskonaut --lib -- --ignored fat32
+```
+
 ### Changing the scan
 Read `docs/scan-performance.md` first. It records what was measured, what turned out not to
 matter, and how to reproduce the numbers with `--benchmark`. The short version: the walk dominates
@@ -182,5 +193,5 @@ and the data model is free, so measure the walker before optimising anything els
 | `libdiskonaut/src/tiles/board.rs` | ~200+ lines — tile nav/zoom |
 | `libdiskonaut/src/tiles/treemap.rs` | ~150+ lines — squarify |
 | `libdiskonaut/src/model/files/file_tree.rs` | ~150 lines — folder tree, hard-link accounting |
-| `libdiskonaut/src/scan/bulk.rs` | ~420 lines — macOS `getattrlistbulk` walker |
+| `libdiskonaut/src/scan/bulk.rs` | ~800 lines — macOS `getattrlistbulk` walker |
 | `diskonaut/src/bench/mod.rs` | ~230 lines — `--benchmark` harness |
