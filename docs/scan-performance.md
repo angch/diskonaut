@@ -1794,6 +1794,81 @@ needs a build and a run on macOS before release. This is the trap finding #7 rec
 deliberately and with the user's agreement rather than by accident.
 
 
+## Squeezing the model, with memory no longer sacred (2026-09-22)
+
+Asked for more speed, memory allowed to give. Two changes landed and three were refused by
+measurement, which by now is the expected ratio.
+
+### Where it stands
+
+| | |
+| --- | --- |
+| `walk` | 0.385–0.421s |
+| model (`tree`) | **0.622–0.651s** |
+| `pipeline` | **0.626–0.650s** |
+| peak RSS | 593 MB |
+
+`pipeline = max(walk, model)`, so the model is still what the scan waits for, and **it only has to
+reach 0.40s** — the walk's floor — for any further work on it to stop mattering. That is a 1.6x
+target, not an open-ended one.
+
+### What landed
+
+- **`shrink_to_fit` on each directory's buffers turned out to be a speed win too**, not just the
+  30 MB it was added for: `tree` 0.664–0.707s with it disabled against 0.623–0.669s with it. Smaller
+  buffers, better locality. Both dimensions agree here, which is rare.
+- **A folder no longer stores its own name.** It was already the key in its parent, nothing ever
+  read the copy, and it cost 385k `OsString`s and 24 bytes per folder: `pipeline` 0.654–0.686s to
+  0.626–0.650s, RSS 617 MB to 593 MB.
+
+### What was refused
+
+**An index of subdirectory positions, so resolving a path scans only folders.** The reasoning was
+sound — a directory holds a median of 3 entries and usually one is a subdirectory, so scanning all
+of them to find a child looks wasteful. Measured: `tree` 0.633–0.670s to **0.671–0.716s**, worse.
+Following `subdirs[i]` into `entries[position]` hops through memory where the plain scan walks it
+in order; at these sizes the contiguous read wins, and the index just adds a third vector to
+maintain.
+
+That is the third time this session a lookup structure has lost to a linear scan over the same
+data. The pattern is worth stating outright: **for a container of about a dozen adjacent items,
+any index that adds an indirection is likely to lose.** The per-folder hash map, the `Vec` of
+`(OsString, node)` pairs, and now the subdirectory index all failed the same way.
+
+**Re-tuning the walker's thread count now that the model binds.** Flat from 12 to 32 workers
+(0.644–0.691s); 24 stays.
+
+### The instrumented breakdown, for whoever goes further
+
+Timers around the phases, on `/data` (the timers themselves inflate the total, so read the ratios):
+
+| phase | time |
+| --- | --- |
+| resolve the parent folder | 0.128s |
+| place the entries | 0.314s |
+| of which: directories (385k) | 0.060s |
+| of which: files (3.85M) | 0.244s |
+
+Placing a file is a push onto a `Vec` and costs ~25–40ns. That is not computation; it is the cost
+of writing ~100 MB of tree into memory that was just allocated, one cache line at a time, on one
+thread. Nothing in the model is algorithmically wrong — it is bandwidth and latency bound.
+
+### The one lever left, and its price
+
+**Parallelise the placement.** Each directory group targets a distinct folder, and placing entries
+touches only that folder, so within one batch the targets are disjoint and could be filled by
+several threads. The resolve pass would stay sequential — it creates ancestors and updates their
+sizes — and the parallel pass would follow it per batch.
+
+It needs only ~1.6x to reach the walk's floor, and 4 threads on disjoint folders should clear that
+easily: `pipeline` 0.65s to ~0.40s, about 38%.
+
+The price is that Rust cannot prove the folders are disjoint. It means raw pointers to tree nodes
+handed across threads, in a tree the main thread is also rendering from live. That is a different
+risk class from everything above — not a wrong number, a potential data race — and it is the
+reason it is written down here rather than built.
+
+
 ## Known gaps
 
 - The reported total for `/` is ~706 GiB against 884 GiB used. The difference is APFS snapshots,
