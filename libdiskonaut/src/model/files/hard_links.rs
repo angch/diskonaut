@@ -3,6 +3,7 @@ use ::std::ffi::OsStr;
 use ::std::path::{Path, PathBuf};
 
 use super::hash::FastMap;
+use crate::scan::SharedBlocks;
 
 /// A directory known to the ledger, addressed by its position in [`HardLinks::dirs`].
 ///
@@ -35,6 +36,10 @@ struct LinkedFile {
 /// the root containing both is 1 KiB.
 pub struct HardLinks {
     files: FastMap<u64, LinkedFile>,
+    /// The same ledger keyed on physical extent, for copy-on-write reflinks. Kept apart from
+    /// `files` because an inode number and a block offset are unrelated numbers that would
+    /// otherwise collide.
+    reflinks: FastMap<u64, LinkedFile>,
     /// Interned directories; index 0 is the scan root (the empty relative path).
     dirs: Vec<Dir>,
     /// Normalised relative directory path to its interned id.
@@ -51,6 +56,7 @@ impl Default for HardLinks {
         ids.insert(Box::from(OsStr::new("")), ROOT);
         Self {
             files: FastMap::default(),
+            reflinks: FastMap::default(),
             dirs: vec![Dir {
                 parent: ROOT,
                 depth: 0,
@@ -124,9 +130,9 @@ impl HardLinks {
     /// link, not with all of them at once: a folder is already charged exactly when it is an
     /// ancestor of some earlier link, and collapsing the earlier links into a single common
     /// ancestor would forget the deeper folders among them.
-    pub fn charge(&mut self, inode: u64, size: u64, directory: &Path) -> Option<usize> {
+    pub fn charge(&mut self, shared: SharedBlocks, size: u64, directory: &Path) -> Option<usize> {
         let directory = self.directory(directory);
-        self.charge_in(inode, size, directory)
+        self.charge_in(shared, size, directory)
     }
 
     /// [`Self::charge`] for a directory already interned with [`Self::directory`].
@@ -134,15 +140,34 @@ impl HardLinks {
     /// # Panics
     ///
     /// If `directory` came from a different `HardLinks`, whose ids mean nothing here.
-    pub fn charge_in(&mut self, inode: u64, size: u64, directory: DirRef) -> Option<usize> {
-        let Self { files, dirs, .. } = self;
-        match files.entry(inode) {
+    pub fn charge_in(
+        &mut self,
+        shared: SharedBlocks,
+        size: u64,
+        directory: DirRef,
+    ) -> Option<usize> {
+        let Self {
+            files,
+            reflinks,
+            dirs,
+            ..
+        } = self;
+        let (seen_before, key) = match shared {
+            SharedBlocks::Inode(inode) => (files, inode),
+            SharedBlocks::Extent(physical) => (reflinks, physical),
+        };
+        match seen_before.entry(key) {
             Entry::Occupied(mut seen) => {
                 let seen = seen.get_mut();
                 if seen.size != size {
                     // Inode numbers are unique only within a filesystem, and a scan of `/` on
                     // macOS covers a volume group whose volumes number their inodes separately.
                     // Two different sizes cannot be the same file, so charge this one in full.
+                    //
+                    // For a reflink the same guard means something slightly different: two files
+                    // that begin with the same physical extent but differ in length are only
+                    // partly the same blocks, and counting them as one would understate. Charging
+                    // in full is the conservative half of that trade.
                     return None;
                 }
                 let mut deepest = 0;
@@ -171,5 +196,12 @@ impl HardLinks {
     #[must_use]
     pub fn tracked(&self) -> usize {
         self.files.len()
+    }
+
+    /// Number of distinct reflinked files the scan has seen, counted once however many copies
+    /// share their blocks.
+    #[must_use]
+    pub fn tracked_reflinks(&self) -> usize {
+        self.reflinks.len()
     }
 }

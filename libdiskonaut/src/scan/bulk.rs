@@ -234,6 +234,9 @@ fn parse_record(record: &[u8], size_attribute: libc::attrgroup_t) -> Option<Pars
                 inode,
                 links,
                 is_dir: object_type == VDIR,
+                // APFS clones share blocks the way reflinks do, but `getattrlistbulk` does not
+                // report sharing and there is no cheap per-file equivalent of FIEMAP here.
+                shared_extent: 0,
             },
         },
         firmlink: flags & SF_FIRMLINK != 0,
@@ -390,6 +393,7 @@ fn read_dir_stat(path: &Path, apparent_size: bool, inode: u64, device: u64) -> i
                 inode: metadata.ino(),
                 links: metadata.nlink(),
                 is_dir: metadata.is_dir(),
+                shared_extent: 0,
             },
         });
         listed.push(ListedAs {

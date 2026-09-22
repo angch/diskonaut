@@ -15,7 +15,7 @@ clap = { version = "4", features = ["derive"] }
 dua-core = "3"
 libc = "0.2"
 libdiskonaut = { path = "libdiskonaut" }
-rustix = { version = "1", default-features = false, features = ["process"] }
+rustix = { version = "1", default-features = false, features = ["std", "process", "fs"] }
 serde = { version = "1", features = ["derive"] }
 thiserror = "2"
 toml = "1"

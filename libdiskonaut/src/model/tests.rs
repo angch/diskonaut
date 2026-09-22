@@ -122,6 +122,7 @@ mod hard_links {
     use ::std::path::{Path, PathBuf};
 
     use crate::model::HardLinks;
+    use crate::scan::SharedBlocks;
 
     /// The old ledger, kept as the specification: compare paths component by component.
     fn reference_charge(
@@ -184,7 +185,7 @@ mod hard_links {
             let inode = next(40);
             let size = 1024 * (1 + next(2));
             assert_eq!(
-                links.charge(inode, size, &dir),
+                links.charge(SharedBlocks::Inode(inode), size, &dir),
                 reference_charge(&mut reference, inode, size, &dir),
                 "inode {inode} size {size} in {}",
                 dir.display()
@@ -193,37 +194,108 @@ mod hard_links {
         assert_eq!(links.tracked(), reference.len());
     }
 
+    /// A reflinked file is the hard-link rule again: the same blocks reached twice inside one
+    /// folder count once, while siblings each hold them in full.
+    #[test]
+    fn reflinked_blocks_are_charged_once_per_folder() {
+        let mut links = HardLinks::default();
+        let blocks = SharedBlocks::Extent(0x4000_0000);
+        // First sighting charges the whole path.
+        assert_eq!(links.charge(blocks, 1024, Path::new("a")), None);
+        // A copy in the same folder is already paid for, down to that folder's depth.
+        assert_eq!(links.charge(blocks, 1024, Path::new("a")), Some(1));
+        // A copy in a sibling: the root above them has it, `b` itself does not.
+        assert_eq!(links.charge(blocks, 1024, Path::new("b")), Some(0));
+        assert_eq!(links.tracked_reflinks(), 1);
+        assert_eq!(links.tracked(), 0, "no hard links were charged");
+    }
+
+    /// An inode number and a physical block offset are unrelated numbers. Sharing one map would
+    /// silently merge a hard-linked file with a reflinked one whose extent happened to match.
+    #[test]
+    fn inode_and_extent_identities_do_not_collide() {
+        let mut links = HardLinks::default();
+        assert_eq!(
+            links.charge(SharedBlocks::Inode(42), 1024, Path::new("a")),
+            None
+        );
+        assert_eq!(
+            links.charge(SharedBlocks::Extent(42), 1024, Path::new("a")),
+            None,
+            "the same number under a different identity is a different file"
+        );
+        assert_eq!(links.tracked(), 1);
+        assert_eq!(links.tracked_reflinks(), 1);
+    }
+
+    /// Two files starting at one physical extent but differing in length share only part of
+    /// themselves. Charging in full overstates; merging them would understate.
+    #[test]
+    fn partly_shared_files_are_charged_in_full() {
+        let mut links = HardLinks::default();
+        let blocks = SharedBlocks::Extent(0x8000);
+        assert_eq!(links.charge(blocks, 4096, Path::new("a")), None);
+        assert_eq!(links.charge(blocks, 8192, Path::new("b")), None);
+    }
+
     /// `charge` returns the depth already accounted for, so folders below it still pay.
     #[test]
     fn spellings_of_one_directory_are_one_directory() {
         let mut links = HardLinks::default();
-        assert_eq!(links.charge(1, 1024, Path::new("a/b")), None);
-        assert_eq!(links.charge(1, 1024, Path::new("a/b/")), Some(2));
-        assert_eq!(links.charge(1, 1024, Path::new("a//b")), Some(2));
-        assert_eq!(links.charge(1, 1024, Path::new("a/./b")), Some(2));
+        assert_eq!(
+            links.charge(SharedBlocks::Inode(1), 1024, Path::new("a/b")),
+            None
+        );
+        assert_eq!(
+            links.charge(SharedBlocks::Inode(1), 1024, Path::new("a/b/")),
+            Some(2)
+        );
+        assert_eq!(
+            links.charge(SharedBlocks::Inode(1), 1024, Path::new("a//b")),
+            Some(2)
+        );
+        assert_eq!(
+            links.charge(SharedBlocks::Inode(1), 1024, Path::new("a/./b")),
+            Some(2)
+        );
     }
 
     #[test]
     fn first_sighting_charges_the_whole_path() {
         let mut links = HardLinks::default();
-        assert_eq!(links.charge(1, 1024, Path::new("a")), None);
+        assert_eq!(
+            links.charge(SharedBlocks::Inode(1), 1024, Path::new("a")),
+            None
+        );
         assert_eq!(links.tracked(), 1);
     }
 
     #[test]
     fn a_second_link_in_the_same_folder_is_already_paid_for() {
         let mut links = HardLinks::default();
-        assert_eq!(links.charge(1, 1024, Path::new("a")), None);
+        assert_eq!(
+            links.charge(SharedBlocks::Inode(1), 1024, Path::new("a")),
+            None
+        );
         // "a" is at depth 1 and already holds it, so nothing below depth 1 owes anything.
-        assert_eq!(links.charge(1, 1024, Path::new("a")), Some(1));
+        assert_eq!(
+            links.charge(SharedBlocks::Inode(1), 1024, Path::new("a")),
+            Some(1)
+        );
     }
 
     #[test]
     fn a_link_in_a_sibling_folder_is_only_paid_for_by_shared_ancestors() {
         let mut links = HardLinks::default();
-        assert_eq!(links.charge(1, 1024, Path::new("a")), None);
+        assert_eq!(
+            links.charge(SharedBlocks::Inode(1), 1024, Path::new("a")),
+            None
+        );
         // Only the root is shared, so "b" itself has not been charged yet.
-        assert_eq!(links.charge(1, 1024, Path::new("b")), Some(0));
+        assert_eq!(
+            links.charge(SharedBlocks::Inode(1), 1024, Path::new("b")),
+            Some(0)
+        );
     }
 
     /// The case a single running common-ancestor gets wrong: once two links have collapsed the
@@ -232,9 +304,12 @@ mod hard_links {
     fn a_third_link_beside_an_earlier_one_is_already_paid_for() {
         for order in [["b", "a", "a"], ["a", "b", "a"]] {
             let mut links = HardLinks::default();
-            assert_eq!(links.charge(1, 1024, Path::new(order[0])), None);
-            links.charge(1, 1024, Path::new(order[1]));
-            let third = links.charge(1, 1024, Path::new(order[2]));
+            assert_eq!(
+                links.charge(SharedBlocks::Inode(1), 1024, Path::new(order[0])),
+                None
+            );
+            links.charge(SharedBlocks::Inode(1), 1024, Path::new(order[1]));
+            let third = links.charge(SharedBlocks::Inode(1), 1024, Path::new(order[2]));
             assert_eq!(
                 third,
                 Some(1),
@@ -247,12 +322,24 @@ mod hard_links {
     #[test]
     fn deeper_folders_are_recognised_independently_of_shallower_ones() {
         let mut links = HardLinks::default();
-        assert_eq!(links.charge(1, 2048, Path::new("other")), None);
-        assert_eq!(links.charge(1, 2048, Path::new("one/two")), Some(0));
+        assert_eq!(
+            links.charge(SharedBlocks::Inode(1), 2048, Path::new("other")),
+            None
+        );
+        assert_eq!(
+            links.charge(SharedBlocks::Inode(1), 2048, Path::new("one/two")),
+            Some(0)
+        );
         // "one/two" holds it already, so nothing below depth 2 owes anything.
-        assert_eq!(links.charge(1, 2048, Path::new("one/two")), Some(2));
+        assert_eq!(
+            links.charge(SharedBlocks::Inode(1), 2048, Path::new("one/two")),
+            Some(2)
+        );
         // A sibling of "two" shares only "one".
-        assert_eq!(links.charge(1, 2048, Path::new("one/three")), Some(1));
+        assert_eq!(
+            links.charge(SharedBlocks::Inode(1), 2048, Path::new("one/three")),
+            Some(1)
+        );
     }
 
     /// Inode numbers repeat across the volumes of a macOS volume group, so a differing size means
@@ -260,7 +347,13 @@ mod hard_links {
     #[test]
     fn a_reused_inode_number_with_a_different_size_is_a_different_file() {
         let mut links = HardLinks::default();
-        assert_eq!(links.charge(1, 1024, Path::new("a")), None);
-        assert_eq!(links.charge(1, 4096, Path::new("b")), None);
+        assert_eq!(
+            links.charge(SharedBlocks::Inode(1), 1024, Path::new("a")),
+            None
+        );
+        assert_eq!(
+            links.charge(SharedBlocks::Inode(1), 4096, Path::new("b")),
+            None
+        );
     }
 }

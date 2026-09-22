@@ -78,6 +78,10 @@ impl FileTree {
     pub fn hard_linked_files(&self) -> usize {
         self.hard_links.tracked()
     }
+    /// How many distinct reflinked files the scan has seen, counted once per set of shared blocks.
+    pub fn reflinked_files(&self) -> usize {
+        self.hard_links.tracked_reflinks()
+    }
     /// Add every entry of one directory at once.
     ///
     /// Resolving `dir_path` is O(depth), and doing it once for the whole directory rather than
@@ -128,9 +132,9 @@ impl FileTree {
                 continue;
             }
             let size = u128::from(entry.meta.size);
-            if entry.meta.is_hardlinked() {
+            if let Some(shared) = entry.meta.shared_blocks() {
                 let dir = *this_dir.get_or_insert_with(|| hard_links.directory(relative_dir));
-                let charged_down_to = hard_links.charge_in(entry.meta.inode, entry.meta.size, dir);
+                let charged_down_to = hard_links.charge_in(shared, entry.meta.size, dir);
                 let first_uncharged = charged_down_to.map_or(0, |charged| charged + 1);
                 for folder_size in &mut size_at_depth[first_uncharged.min(depth + 1)..] {
                     *folder_size += size;

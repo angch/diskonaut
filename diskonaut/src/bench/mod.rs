@@ -32,6 +32,8 @@ pub enum BenchStage {
     Walk,
     /// The current walk feeding the folder tree.
     Tree,
+    /// The folder tree alone: entries are collected first, untimed, then fed to the model.
+    TreeOnly,
     /// The current walk and tree build on separate threads, exactly as the app runs them.
     Pipeline,
     /// Run every stage in order.
@@ -43,6 +45,7 @@ const ALL_STAGES: &[BenchStage] = &[
     BenchStage::DuaTree,
     BenchStage::Walk,
     BenchStage::Tree,
+    BenchStage::TreeOnly,
     BenchStage::Pipeline,
 ];
 
@@ -55,6 +58,8 @@ struct StageResult {
     total_size: u128,
     /// Distinct hard-linked files, counted once however many names point at them.
     hard_linked: usize,
+    /// Distinct reflinked files, counted once however many copies share their blocks.
+    reflinked: usize,
 }
 
 impl StageResult {
@@ -70,6 +75,11 @@ impl StageResult {
         } else {
             String::new()
         };
+        let reflinked = if self.reflinked > 0 {
+            format!("  {} reflinked", self.reflinked)
+        } else {
+            String::new()
+        };
         println!(
             "{:<11}{:>8.3}s  {:>11} entries  {:>10.0} entries/s  {:>7} unreadable  {:>10}{}",
             self.stage,
@@ -78,7 +88,7 @@ impl StageResult {
             rate,
             self.failed,
             human_size(self.total_size),
-            hard_linked,
+            format_args!("{hard_linked}{reflinked}"),
         );
     }
 }
@@ -116,6 +126,7 @@ fn finish(
         failed,
         total_size: tree.get_total_size(),
         hard_linked: tree.hard_linked_files(),
+        reflinked: tree.reflinked_files(),
     };
     std::mem::forget(tree);
     result
@@ -151,6 +162,7 @@ fn bench_dua(path: &Path, options: ScanOptions, build_tree: bool) -> StageResult
         failed,
         total_size,
         hard_linked: 0,
+        reflinked: 0,
     }
 }
 
@@ -184,7 +196,30 @@ fn bench_scan(path: &Path, options: ScanOptions, build_tree: bool) -> StageResul
         failed,
         total_size,
         hard_linked: 0,
+        reflinked: 0,
     }
+}
+
+/// The tree build with the walk taken out of the measurement.
+///
+/// `walk` against `tree` cannot separate the two on Linux, because the consuming thread drives the
+/// walk iterator and a slow consumer stalls the walk's workers. Collecting every directory first
+/// and timing only the model answers "what would the scan cost if the walk were free", which is
+/// the floor a faster walker can reach.
+fn bench_tree_only(path: &Path, options: ScanOptions) -> StageResult {
+    let directories: Vec<DirEntries> = scan_directories(path, options).collect();
+
+    let start = Instant::now();
+    let mut tree = new_tree(path);
+    let mut entries = 0u64;
+    let mut failed = 0u64;
+    for directory in directories {
+        entries += directory.entries.len() as u64;
+        failed += directory.failed;
+        tree.add_dir_entries(&directory.path, directory.entries);
+    }
+
+    finish("tree-only", start, entries, failed, tree)
 }
 
 /// Number of entries batched into one channel message, matching the app.
@@ -260,6 +295,7 @@ pub fn run(path: &Path, stage: BenchStage, options: ScanOptions, repeat: u32) {
                 BenchStage::DuaTree => bench_dua(path, options, true),
                 BenchStage::Walk => bench_scan(path, options, false),
                 BenchStage::Tree => bench_scan(path, options, true),
+                BenchStage::TreeOnly => bench_tree_only(path, options),
                 BenchStage::Pipeline | BenchStage::All => bench_pipeline(path, options),
             };
             result.report();

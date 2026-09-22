@@ -12,6 +12,9 @@ use crate::model::{FileTree, Folder};
 #[cfg(target_os = "macos")]
 pub mod bulk;
 
+#[cfg(target_os = "linux")]
+pub mod linux;
+
 /// Options controlling filesystem traversal.
 #[derive(Clone, Copy, Debug)]
 pub struct ScanOptions {
@@ -56,6 +59,28 @@ pub struct EntryMeta {
     /// Directory entries pointing at this file; `1` for an ordinary file.
     pub links: u64,
     pub is_dir: bool,
+    /// An identity for this file's blocks when every one of them is shared with another file
+    /// through copy-on-write (XFS or btrfs reflink). `0` when they are not, or were not looked
+    /// for. Two files sharing only part of themselves get `0` each and are counted in full.
+    ///
+    /// Reflinked files are the hard-link problem wearing a different hat: one set of blocks
+    /// reachable by several paths. `links` does not see them — every copy is its own inode with
+    /// `nlink == 1` — so without this the same blocks are counted once per copy.
+    pub shared_extent: u64,
+}
+
+/// Why a file's blocks might already have been counted elsewhere.
+///
+/// Both cases mean the same thing to the model — these blocks can be reached by more than one
+/// path, so a folder that reaches them twice must count them once — but they are identified
+/// differently and must not be confused: an inode number and a physical block offset are
+/// unrelated numbers that would otherwise collide in one map.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum SharedBlocks {
+    /// Several names for one inode: a hard link.
+    Inode(u64),
+    /// Several inodes sharing one physical extent: a copy-on-write reflink.
+    Extent(u64),
 }
 
 impl EntryMeta {
@@ -64,6 +89,25 @@ impl EntryMeta {
     #[must_use]
     pub fn is_hardlinked(&self) -> bool {
         !self.is_dir && self.links > 1
+    }
+
+    /// How this file's blocks are shared, if they are.
+    ///
+    /// A reflinked file may also be hard-linked. The extent identity is the stronger of the two —
+    /// every hard link to a file reports the same first extent — so it is preferred, which keeps
+    /// one file to one identity and one ledger entry.
+    #[must_use]
+    pub fn shared_blocks(&self) -> Option<SharedBlocks> {
+        if self.is_dir {
+            return None;
+        }
+        if self.shared_extent != 0 {
+            return Some(SharedBlocks::Extent(self.shared_extent));
+        }
+        if self.links > 1 {
+            return Some(SharedBlocks::Inode(self.inode));
+        }
+        None
     }
 }
 
@@ -88,7 +132,9 @@ pub struct DirEntries {
 /// Walk `root`, yielding the contents of one directory at a time.
 ///
 /// On macOS this uses [`bulk`], which asks the kernel only for the attributes disk usage needs.
-/// Elsewhere it groups the `dua-core` walk, which reports a directory's entries consecutively.
+/// On Linux it uses [`linux`], which owns its own thread pool because `dua-core`'s stops scaling
+/// well before the kernel does. Elsewhere it groups the `dua-core` walk, which reports a
+/// directory's entries consecutively.
 pub fn scan_directories(root: &Path, options: ScanOptions) -> impl Iterator<Item = DirEntries> {
     #[cfg(target_os = "macos")]
     {
@@ -100,18 +146,23 @@ pub fn scan_directories(root: &Path, options: ScanOptions) -> impl Iterator<Item
             options.one_file_system,
         )
     }
-    #[cfg(not(target_os = "macos"))]
+    #[cfg(target_os = "linux")]
+    {
+        linux::walk_linux(root, thread_count(options), options)
+    }
+    #[cfg(not(any(target_os = "macos", target_os = "linux")))]
     {
         fallback::group_by_directory(root, options)
     }
 }
 
-/// Compiled on every platform, though only used off macOS, so that it cannot rot unnoticed.
-#[cfg_attr(target_os = "macos", allow(dead_code))]
+/// Compiled on every platform, though only selected on platforms that are neither macOS nor
+/// Linux, so that it cannot rot unnoticed. The tests call it directly everywhere.
+#[cfg_attr(any(target_os = "macos", target_os = "linux"), allow(dead_code))]
 mod fallback {
     use super::{
         DirEntries, EntryMeta, NamedEntry, Options, Order, ScanOptions, descend_predicate,
-        entry_identity, entry_size, thread_count, walk,
+        dua_thread_count, entry_identity, entry_size, walk,
     };
     use ::std::path::Path;
     use ::std::sync::Arc;
@@ -132,7 +183,7 @@ mod fallback {
         let descend = descend_predicate(&root, options);
         let mut walk = walk(
             &root,
-            thread_count(options),
+            dua_thread_count(options),
             Order::Completion,
             Options::default(),
             descend,
@@ -186,6 +237,7 @@ mod fallback {
                             inode,
                             links,
                             is_dir: file_type.is_dir(),
+                            shared_extent: 0,
                         },
                     }
                 });
@@ -229,24 +281,52 @@ pub enum ScanItem {
     ReadError,
 }
 
+/// Workers for the walker the app actually uses.
 pub fn thread_count(options: ScanOptions) -> usize {
+    capped(options, MAX_SCAN_THREADS)
+}
+
+/// Workers for the `dua-core` walk, wherever it is still reached.
+///
+/// It needs its own number. The cap below is a property of a walker, not of a machine: raising the
+/// native walker's cap to 24 and letting `dua-core` inherit it made the `dua-*` benchmark stages —
+/// and `scan_folder`, which is public — 38% slower on this box, by running the one walker that
+/// collapses past eight workers at 24 of them.
+fn dua_thread_count(options: ScanOptions) -> usize {
+    capped(options, MAX_DUA_THREADS)
+}
+
+fn capped(options: ScanOptions, cap: usize) -> usize {
     if let Some(threads) = options.threads {
         return threads.max(1);
     }
     if options.parallel {
-        // Past a handful of workers the filesystem, not the CPU, is the limit: measured on a
-        // 14-core machine, a whole-disk scan is fastest around six to eight threads and gets
-        // steadily slower beyond that as the kernel spends its time on contention.
         std::thread::available_parallelism()
             .map_or(1, NonZero::get)
-            .min(MAX_SCAN_THREADS)
+            .min(cap)
     } else {
         1
     }
 }
 
-/// Worker cap for the scan, past which filesystem contention outweighs added parallelism.
+/// Worker cap for the scan, past which more workers stop paying for themselves.
+///
+/// The two numbers come from different walkers and do not transfer to each other.
+///
+/// On macOS the `getattrlistbulk` walk really does contend: a whole-disk scan is fastest around
+/// six to eight workers on a 14-core machine and gets steadily slower beyond that.
+///
+/// On Linux the old cap of eight was a property of the `dua-core` walk, which collapsed past it —
+/// not of the kernel, which serves sixteen concurrent walkers at near-linear throughput. With the
+/// native walker the curve is flat from twelve workers up: on a 32-core box, XFS and ext4 both
+/// bottom out around twenty-four and give up only a few percent by thirty-two.
+#[cfg(target_os = "linux")]
+const MAX_SCAN_THREADS: usize = 24;
+#[cfg(not(target_os = "linux"))]
 const MAX_SCAN_THREADS: usize = 8;
+
+/// Worker cap for the `dua-core` walk, which collapses past eight on every machine measured.
+const MAX_DUA_THREADS: usize = 8;
 
 /// Walk `root` and yield each filesystem entry (or a read error marker).
 pub fn scan_folder(root: impl AsRef<Path>, options: ScanOptions) -> impl Iterator<Item = ScanItem> {
@@ -254,7 +334,7 @@ pub fn scan_folder(root: impl AsRef<Path>, options: ScanOptions) -> impl Iterato
         .as_ref()
         .canonicalize()
         .unwrap_or_else(|_| root.as_ref().to_path_buf());
-    let threads = thread_count(options);
+    let threads = dua_thread_count(options);
     let apparent = options.show_apparent_size;
     let descend = descend_predicate(&root, options);
 
@@ -278,6 +358,7 @@ pub fn scan_folder(root: impl AsRef<Path>, options: ScanOptions) -> impl Iterato
                             inode,
                             links,
                             is_dir: entry.file_type.is_dir(),
+                            shared_extent: 0,
                         },
                     }
                 }

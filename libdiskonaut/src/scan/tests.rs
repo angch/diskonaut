@@ -469,3 +469,297 @@ fn one_file_system_scans_same_device() {
     assert_eq!(tree.get_total_descendants(), expected.len() as u64);
     let _ = std::fs::remove_dir_all(&dir);
 }
+
+/// The native Linux walker: the properties the rest of the pipeline relies on.
+///
+/// These exercise the walker actually selected on Linux. The `fallback` tests above cover the
+/// `dua-core` grouping, which Linux no longer uses but other platforms still do.
+#[cfg(target_os = "linux")]
+mod linux_walker {
+    use super::{ScanOptions, temp_scan_dir};
+    use crate::scan::linux::walk_linux;
+    use ::std::collections::HashMap;
+    use ::std::fs::{File, create_dir_all};
+    use ::std::io::Write;
+    use ::std::path::{Path, PathBuf};
+
+    /// `root/a/deep/x.bin`, `root/a/y.bin`, `root/b/z.bin`, each 1024 bytes.
+    fn tree(name: &str) -> PathBuf {
+        let root = temp_scan_dir(name);
+        create_dir_all(root.join("a/deep")).expect("mkdir");
+        create_dir_all(root.join("b")).expect("mkdir");
+        for path in ["a/deep/x.bin", "a/y.bin", "b/z.bin"] {
+            let mut file = File::create(root.join(path)).expect("create");
+            file.write_all(&[7u8; 1024]).expect("write");
+        }
+        root
+    }
+
+    fn walk(root: &Path, threads: usize, options: ScanOptions) -> Vec<crate::scan::DirEntries> {
+        walk_linux(root, threads, options).collect()
+    }
+
+    #[test]
+    fn reports_every_entry_exactly_once() {
+        let root = tree("linux_once");
+        for threads in [1, 2, 8] {
+            let groups = walk(&root, threads, ScanOptions::default());
+            let mut seen: HashMap<PathBuf, usize> = HashMap::new();
+            for group in &groups {
+                for entry in &group.entries {
+                    *seen.entry(group.path.join(&entry.name)).or_default() += 1;
+                }
+            }
+            assert_eq!(
+                seen.len(),
+                6,
+                "3 files + 3 dirs (a, b, a/deep), at {threads} threads"
+            );
+            assert!(
+                seen.values().all(|&count| count == 1),
+                "every entry exactly once at {threads} threads, got {seen:?}"
+            );
+        }
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    /// One group per directory is what lets the tree builder resolve each parent once. The
+    /// `dua-core` grouping could not promise this — it emitted about two groups per directory.
+    #[test]
+    fn emits_one_group_per_directory() {
+        let root = tree("linux_groups");
+        let groups = walk(&root, 8, ScanOptions::default());
+        let mut paths: Vec<_> = groups.iter().map(|group| group.path.clone()).collect();
+        paths.sort();
+        let unique = {
+            let mut unique = paths.clone();
+            unique.dedup();
+            unique
+        };
+        assert_eq!(
+            paths, unique,
+            "a directory was reported in more than one group"
+        );
+        assert_eq!(paths.len(), 4, "root, a, a/deep, b");
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    #[test]
+    fn apparent_size_reports_file_length() {
+        let root = tree("linux_apparent");
+        let options = ScanOptions {
+            show_apparent_size: true,
+            ..ScanOptions::default()
+        };
+        let total: u64 = walk(&root, 4, options)
+            .iter()
+            .flat_map(|group| &group.entries)
+            .filter(|entry| !entry.meta.is_dir)
+            .map(|entry| entry.meta.size)
+            .sum();
+        assert_eq!(total, 3 * 1024);
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    #[test]
+    fn max_depth_stops_descending() {
+        let root = tree("linux_depth");
+        // Depth 1 is the root's own entries; nothing below them is read.
+        let groups = walk(
+            &root,
+            4,
+            ScanOptions {
+                max_depth: Some(1),
+                ..ScanOptions::default()
+            },
+        );
+        assert_eq!(groups.len(), 1, "only the root directory is read");
+        assert_eq!(groups[0].entries.len(), 2, "a and b");
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    #[test]
+    fn symlinks_are_not_followed() {
+        let root = tree("linux_symlink");
+        std::os::unix::fs::symlink(root.join("a"), root.join("loop")).expect("symlink");
+        let groups = walk(&root, 4, ScanOptions::default());
+        assert_eq!(groups.len(), 4, "the symlink is not descended into");
+        let linked = groups
+            .iter()
+            .flat_map(|group| &group.entries)
+            .find(|entry| entry.name == "loop")
+            .expect("the symlink is still reported as an entry");
+        assert!(
+            !linked.meta.is_dir,
+            "a symlink to a directory is not a directory"
+        );
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    /// `/proc` and `/sys` are kernel interfaces, not disks. The walk crosses into them only if it
+    /// cannot tell them apart from a filesystem holding data.
+    #[test]
+    fn pseudo_filesystems_are_recognised() {
+        use crate::scan::linux::filesystem::is_pseudo;
+        assert!(is_pseudo(Path::new("/proc")), "/proc holds no disk usage");
+        assert!(is_pseudo(Path::new("/sys")), "/sys holds no disk usage");
+        assert!(!is_pseudo(Path::new("/")), "the root filesystem does");
+        assert!(
+            !is_pseudo(Path::new("/tmp")),
+            "tmpfs holds real files and is counted, as du counts it"
+        );
+    }
+
+    /// Scanning a pseudo-filesystem asked for by name still works — the skip applies to crossing
+    /// into one part-way through a scan, not to the root the user chose.
+    #[test]
+    fn a_pseudo_filesystem_can_still_be_scanned_directly() {
+        let groups = walk(Path::new("/proc"), 4, ScanOptions::default());
+        assert!(
+            groups.len() > 1,
+            "asking for /proc by name should still walk it, got {} groups",
+            groups.len()
+        );
+    }
+
+    /// Dropping the walk part-way must stop the workers, not let them finish the tree while the
+    /// consumer waits to join them. Without a stop flag this took 32 seconds on a whole disk.
+    #[test]
+    fn dropping_the_walk_early_does_not_hang() {
+        let root = tree("linux_early_drop");
+        let mut walk = walk_linux(&root, 8, ScanOptions::default());
+        let _first = walk.next().expect("at least one directory");
+        drop(walk); // Joins the workers; hangs here if the stop flag is not honoured.
+        let _ = std::fs::remove_dir_all(&root);
+    }
+}
+
+/// End-to-end reflink accounting, on a filesystem that can actually share extents.
+///
+/// `std::env::temp_dir()` is usually ext4, which cannot, so this skips itself there rather than
+/// passing vacuously. Point `DISKONAUT_TEST_REFLINK_DIR` at a directory on XFS or btrfs to run it
+/// for real — which is the only way this is tested at all.
+#[cfg(target_os = "linux")]
+mod reflink {
+    use super::{ScanOptions, scan_into_tree};
+    use ::std::fs::File;
+    use ::std::io::Write;
+    use ::std::os::fd::AsRawFd;
+    use ::std::path::PathBuf;
+
+    /// `_IOW(0x94, 9, int)`: make this file share the source file's extents.
+    const FICLONE: libc::c_ulong = 0x4004_9409;
+
+    fn clone_file(from: &File, to: &File) -> bool {
+        // SAFETY: both descriptors are open for the duration of the call.
+        unsafe { libc::ioctl(to.as_raw_fd(), FICLONE, from.as_raw_fd()) == 0 }
+    }
+
+    /// Sharing the *opening* extent is not sharing the file. A reflink copy whose middle has been
+    /// overwritten is a different file that happens to start in the same place, and merging the
+    /// two would report half the space actually held.
+    /// A scratch tree with `a/` and `b/`, wherever the caller pointed us.
+    fn fixture(name: &str) -> Option<PathBuf> {
+        let base = ::std::env::var_os("DISKONAUT_TEST_REFLINK_DIR")
+            .map_or_else(::std::env::temp_dir, PathBuf::from);
+        let root = base.join(format!("diskonaut_scan_test_{name}"));
+        let _ = ::std::fs::remove_dir_all(&root);
+        ::std::fs::create_dir_all(root.join("a")).ok()?;
+        ::std::fs::create_dir_all(root.join("b")).ok()?;
+        Some(root)
+    }
+
+    #[test]
+    fn a_partly_shared_copy_is_counted_in_full() {
+        let Some(root) = fixture("reflink_partial") else {
+            return;
+        };
+        let payload = vec![9u8; 256 * 1024];
+        let source_path = root.join("a/payload.bin");
+        ::std::fs::write(&source_path, &payload).expect("write source");
+
+        let source = File::open(&source_path).expect("open source");
+        let copy_path = root.join("b/payload.bin");
+        let copy = File::create(&copy_path).expect("create copy");
+        if !clone_file(&source, &copy) {
+            let _ = ::std::fs::remove_dir_all(&root);
+            eprintln!("skipped: cannot reflink");
+            return;
+        }
+        drop(copy);
+        drop(source);
+
+        // Rewrite the middle, breaking the share for everything but the first extent.
+        let mut copy = ::std::fs::OpenOptions::new()
+            .write(true)
+            .open(&copy_path)
+            .expect("reopen copy");
+        ::std::io::Seek::seek(&mut copy, ::std::io::SeekFrom::Start(100 * 1024)).expect("seek");
+        copy.write_all(&vec![1u8; 56 * 1024]).expect("overwrite");
+        copy.sync_all().expect("sync");
+        drop(copy);
+
+        let options = ScanOptions {
+            show_apparent_size: true,
+            ..ScanOptions::default()
+        };
+        let (tree, _) = scan_into_tree(&root, options);
+        let total = tree.get_total_size();
+        let reflinked = tree.reflinked_files();
+        let _ = ::std::fs::remove_dir_all(&root);
+
+        assert_eq!(
+            reflinked, 0,
+            "a partly shared file is not a copy of anything"
+        );
+        assert_eq!(
+            total,
+            2 * 256 * 1024,
+            "both files are held in full, so both are counted"
+        );
+    }
+
+    #[test]
+    fn a_reflinked_copy_is_counted_once() {
+        let base = ::std::env::var_os("DISKONAUT_TEST_REFLINK_DIR")
+            .map_or_else(::std::env::temp_dir, PathBuf::from);
+        let root = base.join("diskonaut_scan_test_reflink");
+        let _ = ::std::fs::remove_dir_all(&root);
+        ::std::fs::create_dir_all(root.join("a")).expect("mkdir a");
+        ::std::fs::create_dir_all(root.join("b")).expect("mkdir b");
+
+        // Large enough to clear the walker's probe threshold and to occupy whole blocks.
+        let payload = vec![9u8; 256 * 1024];
+        let source_path = root.join("a/payload.bin");
+        let mut source = File::create(&source_path).expect("create source");
+        source.write_all(&payload).expect("write");
+        source.sync_all().expect("sync");
+        drop(source);
+
+        let source = File::open(&source_path).expect("open source");
+        let copy = File::create(root.join("b/payload.bin")).expect("create copy");
+        if !clone_file(&source, &copy) {
+            let _ = ::std::fs::remove_dir_all(&root);
+            eprintln!("skipped: {} cannot reflink", base.display());
+            return;
+        }
+        drop(copy);
+        drop(source);
+
+        let (tree, failed) = scan_into_tree(&root, ScanOptions::default());
+        let total = tree.get_total_size();
+        let reflinked = tree.reflinked_files();
+        let _ = ::std::fs::remove_dir_all(&root);
+
+        assert_eq!(failed, 0);
+        assert_eq!(reflinked, 1, "the shared extent should be recognised once");
+        assert!(
+            total < 2 * 256 * 1024,
+            "two names for one set of blocks must not count twice, got {total}"
+        );
+        assert!(
+            total >= 256 * 1024,
+            "the blocks are still held once, got {total}"
+        );
+    }
+}
