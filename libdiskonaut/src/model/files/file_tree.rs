@@ -4,7 +4,11 @@ use ::std::path::{Component, Path, PathBuf};
 use crate::model::{FileOrFolder, FileToDelete, Folder, HardLinks};
 use ::std::sync::Arc;
 
-use crate::scan::{DirEntries, EntryMeta, NamedEntry};
+use crate::scan::{DirEntries, EntryMeta, NamedEntry, SharedBlocks};
+
+/// Shared-block sightings a tree has put off charging: one entry per directory that held any,
+/// with the directory's path relative to the scan root.
+type Sightings = Vec<(PathBuf, Vec<(SharedBlocks, u64)>)>;
 
 pub struct FileTree {
     pub current_folder_names: Vec<OsString>,
@@ -15,6 +19,10 @@ pub struct FileTree {
     hard_links: HardLinks,
     /// Reused between calls: how much size to add at each depth from the base folder down.
     size_at_depth: Vec<u128>,
+    /// When set, shared blocks are counted in full and noted here instead of being charged, so
+    /// that several trees built in parallel can be merged and then reconciled once. `None` is the
+    /// ordinary tree, which charges as it goes.
+    deferred: Option<Sightings>,
 }
 
 impl FileTree {
@@ -30,6 +38,53 @@ impl FileTree {
             failed_to_read: 0,
             hard_links: HardLinks::default(),
             size_at_depth: Vec::new(),
+            deferred: None,
+        }
+    }
+
+    /// A tree that counts shared blocks in full and remembers where it saw them, for building in
+    /// parallel. Call [`Self::replay_deferred`] on the merged result to make the sizes right.
+    pub fn deferring_shared_blocks(base_folder: Folder, path_in_filesystem: PathBuf) -> Self {
+        let mut tree = Self::new(base_folder, path_in_filesystem);
+        tree.deferred = Some(Vec::new());
+        tree
+    }
+
+    /// Fold another tree of the same scan root into this one.
+    ///
+    /// The other tree's folders add to this one's, and its deferred sightings — if either side
+    /// has any — are carried over so that one `replay_deferred` on the result settles everything.
+    pub fn merge_from(&mut self, other: FileTree) {
+        self.base_folder.merge_from(other.base_folder);
+        self.failed_to_read += other.failed_to_read;
+        if let Some(theirs) = other.deferred {
+            self.deferred.get_or_insert_with(Vec::new).extend(theirs);
+        }
+    }
+
+    /// Charge every shared block this tree deferred, and take back what was over-counted.
+    ///
+    /// During a deferred build each shared entry was added in full to every ancestor. Charging it
+    /// now says which of those ancestors — from the root down to some depth — had already counted
+    /// the same blocks through another path; those give the size back. The ledger's answers are
+    /// order-independent, so replaying in shard order rather than arrival order lands on the same
+    /// per-folder sizes an ordinary tree would have. Afterwards the tree is an ordinary tree.
+    pub fn replay_deferred(&mut self) {
+        let Some(sightings) = self.deferred.take() else {
+            return;
+        };
+        for (dir, shared) in sightings {
+            let depth = dir.components().count();
+            let dir_ref = self.hard_links.directory(&dir);
+            for (blocks, size) in shared {
+                if let Some(charged) = self.hard_links.charge_in(blocks, size, dir_ref) {
+                    self.base_folder.subtract_along(
+                        dir.components().map(Component::as_os_str),
+                        charged.min(depth),
+                        u128::from(size),
+                    );
+                }
+            }
         }
     }
     pub fn get_total_size(&self) -> u128 {
@@ -126,6 +181,7 @@ impl FileTree {
             base_folder,
             hard_links,
             size_at_depth,
+            deferred,
             ..
         } = self;
 
@@ -134,21 +190,34 @@ impl FileTree {
         let mut normal_size = 0u128;
         // Interned only if this directory turns out to hold a hard link; most do not.
         let mut this_dir = None;
+        let mut noted: Option<Vec<(SharedBlocks, u64)>> = None;
         for entry in &entries {
             if entry.meta.is_dir {
                 continue;
             }
             let size = u128::from(entry.meta.size);
-            if let Some(shared) = entry.meta.shared_blocks() {
-                let dir = *this_dir.get_or_insert_with(|| hard_links.directory(relative_dir));
-                let charged_down_to = hard_links.charge_in(shared, entry.meta.size, dir);
-                let first_uncharged = charged_down_to.map_or(0, |charged| charged + 1);
-                for folder_size in &mut size_at_depth[first_uncharged.min(depth + 1)..] {
-                    *folder_size += size;
+            match entry.meta.shared_blocks() {
+                Some(shared) if deferred.is_some() => {
+                    // Counted in full for now like any other file; the sighting is kept so that
+                    // `replay_deferred` can take back whatever turns out to be counted twice.
+                    normal_size += size;
+                    noted
+                        .get_or_insert_with(Vec::new)
+                        .push((shared, entry.meta.size));
                 }
-            } else {
-                normal_size += size;
+                Some(shared) => {
+                    let dir = *this_dir.get_or_insert_with(|| hard_links.directory(relative_dir));
+                    let charged_down_to = hard_links.charge_in(shared, entry.meta.size, dir);
+                    let first_uncharged = charged_down_to.map_or(0, |charged| charged + 1);
+                    for folder_size in &mut size_at_depth[first_uncharged.min(depth + 1)..] {
+                        *folder_size += size;
+                    }
+                }
+                None => normal_size += size,
             }
+        }
+        if let (Some(deferred), Some(noted)) = (deferred.as_mut(), noted) {
+            deferred.push((relative_dir.to_path_buf(), noted));
         }
         if normal_size > 0 {
             for folder_size in &mut size_at_depth[..] {

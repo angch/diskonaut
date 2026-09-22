@@ -28,6 +28,12 @@ pub struct Opt {
     /// Repeat each benchmark stage this many times
     #[arg(long, value_name = "N", default_value_t = 1)]
     pub bench_repeat: u32,
+    /// Tree-building threads for the `sharded` benchmark stage
+    #[arg(long, value_name = "N", default_value_t = 4)]
+    pub bench_shards: usize,
+    /// Shard directories by their first N path components (0 = the whole path)
+    #[arg(long, value_name = "N", default_value_t = 0)]
+    pub bench_shard_depth: usize,
     /// Stop descending below this depth (partial scans; the root is depth 0)
     #[arg(long, value_name = "N")]
     pub max_depth: Option<usize>,

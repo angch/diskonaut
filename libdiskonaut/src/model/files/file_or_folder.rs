@@ -149,6 +149,42 @@ impl Folder {
         }
     }
 
+    /// Fold another partial view of this same folder into this one.
+    ///
+    /// Sizes and counts add, because each side counted disjoint groups of entries; where both
+    /// sides hold a folder of the same name, that folder is merged in turn.
+    pub fn merge_from(&mut self, other: Folder) {
+        self.size += other.size;
+        self.num_descendants += other.num_descendants;
+        self.contents.merge_from(other.contents);
+    }
+
+    /// Take `size` back from this folder and from the first `down_to` folders along `path`.
+    ///
+    /// This is the second half of deferred shared-block accounting: a file whose blocks had
+    /// already been counted by some folder was nonetheless added in full to every ancestor during
+    /// a parallel build, and the ancestors from the root down to the one that already held it
+    /// have to give that back. Saturating for the same reason `delete_path` is.
+    pub fn subtract_along<'a>(
+        &mut self,
+        mut path: impl Iterator<Item = &'a OsStr>,
+        down_to: usize,
+        size: u128,
+    ) {
+        let mut folder = self;
+        folder.size = folder.size.saturating_sub(size);
+        for _ in 0..down_to {
+            let Some(name) = path.next() else {
+                return;
+            };
+            folder = match folder.contents.get_mut(name) {
+                Some(FileOrFolder::Folder(next)) => next,
+                _ => return,
+            };
+            folder.size = folder.size.saturating_sub(size);
+        }
+    }
+
     pub fn add_folder(&mut self, path: PathBuf) {
         self.add_entry(
             EntryMeta {

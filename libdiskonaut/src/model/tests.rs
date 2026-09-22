@@ -357,3 +357,217 @@ mod hard_links {
         );
     }
 }
+
+/// A tree built in parallel shards, merged, and reconciled must be indistinguishable from one
+/// built inline — folder by folder, not just in total. This is the property the parallel build
+/// rests on, and it is the ledger's order-independence made concrete: shards replay their shared
+/// blocks in an order that has nothing to do with arrival order.
+mod sharded {
+    use ::std::collections::BTreeMap;
+    use ::std::ffi::OsStr;
+    use ::std::hash::{DefaultHasher, Hash, Hasher};
+    use ::std::path::{Path, PathBuf};
+    use ::std::sync::Arc;
+
+    use crate::model::{FileOrFolder, FileTree, Folder};
+    use crate::scan::{DirEntries, EntryMeta};
+
+    fn folder_sizes(folder: &Folder, at: PathBuf, out: &mut BTreeMap<PathBuf, (u128, u64)>) {
+        out.insert(at.clone(), (folder.size, folder.num_descendants));
+        for (name, node) in folder.contents.iter() {
+            if let FileOrFolder::Folder(child) = node {
+                folder_sizes(child, at.join(name), out);
+            }
+        }
+    }
+
+    /// One group per directory of a small random tree, in random order, thick with shared
+    /// blocks: hard links (same inode, same size, many folders) and reflinks (same extent).
+    fn synthetic_groups(root: &Path, seed: u64) -> Vec<DirEntries> {
+        let mut state = seed.wrapping_mul(0x9E37_79B9_7F4A_7C15) | 1;
+        let mut next = |bound: u64| {
+            state ^= state << 13;
+            state ^= state >> 7;
+            state ^= state << 17;
+            state % bound
+        };
+        // A tree of directories: a few names reused at every level so shards share ancestors.
+        let mut dirs: Vec<PathBuf> = vec![PathBuf::new()];
+        for depth in 1..=4 {
+            let parents: Vec<PathBuf> = dirs
+                .iter()
+                .filter(|dir| dir.components().count() == depth - 1)
+                .cloned()
+                .collect();
+            for parent in parents {
+                let children = next(4);
+                for _ in 0..children {
+                    let name = ["d0", "d1", "d2", "d3", "d4", "d5"][next(6) as usize];
+                    let child = parent.join(name);
+                    if !dirs.contains(&child) {
+                        dirs.push(child);
+                    }
+                }
+            }
+        }
+        let mut groups: Vec<DirEntries> = dirs
+            .iter()
+            .map(|dir| {
+                let mut group = DirEntries::new(Arc::from(root.join(dir).as_path()));
+                for child in dirs
+                    .iter()
+                    .filter(|other| other.parent() == Some(dir.as_path()))
+                {
+                    let name = child.file_name().expect("child has a name");
+                    group.push(
+                        name,
+                        EntryMeta {
+                            is_dir: true,
+                            ..EntryMeta::default()
+                        },
+                    );
+                }
+                let files = next(7);
+                for i in 0..files {
+                    let name = format!("f{i}");
+                    let meta = match next(3) {
+                        0 => EntryMeta {
+                            size: 1 + next(5000),
+                            inode: 1_000_000 + next(1_000_000),
+                            links: 1,
+                            ..EntryMeta::default()
+                        },
+                        1 => {
+                            // A hard link: one of 12 inodes, each with a fixed size.
+                            let inode = 1 + next(12);
+                            EntryMeta {
+                                size: 1024 * (1 + inode % 3),
+                                inode,
+                                links: 5,
+                                ..EntryMeta::default()
+                            }
+                        }
+                        _ => {
+                            // A reflink: one of 8 extents, each with a fixed size.
+                            let extent = 100 + next(8);
+                            EntryMeta {
+                                size: 4096 * (1 + extent % 4),
+                                inode: 5_000_000 + next(1_000_000),
+                                links: 1,
+                                shared_extent: extent,
+                                ..EntryMeta::default()
+                            }
+                        }
+                    };
+                    group.push(OsStr::new(&name), meta);
+                }
+                group
+            })
+            .collect();
+        // Random arrival order, so children regularly arrive before their parents.
+        for i in (1..groups.len()).rev() {
+            let j = next(i as u64 + 1) as usize;
+            groups.swap(i, j);
+        }
+        groups
+    }
+
+    fn shard_of(path: &Path, shards: usize) -> usize {
+        let mut hasher = DefaultHasher::new();
+        path.hash(&mut hasher);
+        (hasher.finish() % shards as u64) as usize
+    }
+
+    #[test]
+    fn sharded_build_matches_inline_build_folder_by_folder() {
+        let root = PathBuf::from("/synthetic/root");
+        for seed in [1u64, 7, 42, 1234, 99_999] {
+            let mut inline = FileTree::new(Folder::new(&root), root.clone());
+            for group in synthetic_groups(&root, seed) {
+                inline.add_dir_entries(group);
+            }
+            let mut expected = BTreeMap::new();
+            folder_sizes(inline.get_current_folder(), PathBuf::new(), &mut expected);
+            assert!(
+                inline.hard_linked_files() > 0 && inline.reflinked_files() > 0,
+                "seed {seed} must exercise both kinds of sharing to prove anything"
+            );
+
+            for shards in [1usize, 2, 3, 4, 8] {
+                let mut trees: Vec<FileTree> = (0..shards)
+                    .map(|_| FileTree::deferring_shared_blocks(Folder::new(&root), root.clone()))
+                    .collect();
+                for group in synthetic_groups(&root, seed) {
+                    let shard = shard_of(&group.path, shards);
+                    trees[shard].add_dir_entries(group);
+                }
+                let mut merged = trees.pop().expect("at least one shard");
+                for tree in trees {
+                    merged.merge_from(tree);
+                }
+                merged.replay_deferred();
+
+                let mut actual = BTreeMap::new();
+                folder_sizes(merged.get_current_folder(), PathBuf::new(), &mut actual);
+                assert_eq!(
+                    actual, expected,
+                    "seed {seed}, {shards} shards: folder sizes or descendant counts differ"
+                );
+                assert_eq!(merged.hard_linked_files(), inline.hard_linked_files());
+                assert_eq!(merged.reflinked_files(), inline.reflinked_files());
+                assert_eq!(merged.get_total_size(), inline.get_total_size());
+            }
+        }
+    }
+
+    /// The placeholder case on its own: a child's group arrives before its parent's, in a
+    /// different shard, so the parent exists twice at merge time — once real, once as a stub.
+    #[test]
+    fn a_stub_parent_merges_into_the_real_one() {
+        let root = PathBuf::from("/synthetic/root");
+        let file = |size: u64| EntryMeta {
+            size,
+            inode: size,
+            links: 1,
+            ..EntryMeta::default()
+        };
+        let mut shard_a = FileTree::deferring_shared_blocks(Folder::new(&root), root.clone());
+        let mut shard_b = FileTree::deferring_shared_blocks(Folder::new(&root), root.clone());
+
+        // Shard B gets `top/inner` and creates `top` as a stub on the way.
+        let mut inner = DirEntries::new(Arc::from(root.join("top/inner").as_path()));
+        inner.push(OsStr::new("deep.bin"), file(300));
+        shard_b.add_dir_entries(inner);
+
+        // Shard A gets `top` itself, with the real entry for `inner` and a file of its own.
+        let mut top = DirEntries::new(Arc::from(root.join("top").as_path()));
+        top.push(
+            OsStr::new("inner"),
+            EntryMeta {
+                is_dir: true,
+                ..EntryMeta::default()
+            },
+        );
+        top.push(OsStr::new("shallow.bin"), file(200));
+        shard_a.add_dir_entries(top);
+
+        shard_a.merge_from(shard_b);
+        shard_a.replay_deferred();
+
+        let mut sizes = BTreeMap::new();
+        folder_sizes(shard_a.get_current_folder(), PathBuf::new(), &mut sizes);
+        assert_eq!(sizes[&PathBuf::from("")].0, 500);
+        assert_eq!(sizes[&PathBuf::from("top")].0, 500);
+        assert_eq!(sizes[&PathBuf::from("top/inner")].0, 300);
+        assert_eq!(
+            sizes.len(),
+            3,
+            "no duplicate `top` or `inner` survived the merge"
+        );
+        assert_eq!(
+            sizes[&PathBuf::from("top")].1,
+            3,
+            "inner, shallow.bin, deep.bin"
+        );
+    }
+}

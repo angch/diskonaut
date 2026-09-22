@@ -78,7 +78,14 @@ fn try_main() -> Result<(), Error> {
 
     if opts.benchmark {
         let folder = opts.resolve_folder()?;
-        bench::run(&folder, opts.bench_stage, scan_options, opts.bench_repeat);
+        bench::run(
+            &folder,
+            opts.bench_stage,
+            scan_options,
+            opts.bench_repeat,
+            opts.bench_shards,
+            opts.bench_shard_depth,
+        );
         return Ok(());
     }
 

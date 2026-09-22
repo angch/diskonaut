@@ -186,6 +186,44 @@ impl Contents {
         Some(removed.node)
     }
 
+    /// Take everything `other` holds into this folder.
+    ///
+    /// A folder that is still empty just takes `other`'s buffers whole, which is the common case
+    /// when several partial trees are merged: a directory's own entries all arrive in one group,
+    /// so they land in one shard and every other shard sees that folder empty or not at all.
+    /// Otherwise `other`'s names are appended and each entry re-placed, and a folder entry that
+    /// already exists here is merged into the existing one rather than duplicated — that is the
+    /// shared-ancestor case, where two shards both created `home/` on the way to different things
+    /// beneath it. Files cannot collide, for the reason above.
+    pub fn merge_from(&mut self, other: Contents) {
+        if self.entries.is_empty() {
+            *self = other;
+            return;
+        }
+        let Contents { names, entries, .. } = other;
+        let shift = self.absorb_names(names);
+        for entry in entries {
+            let offset = entry.offset + shift;
+            let len = entry.len;
+            match entry.node {
+                FileOrFolder::Folder(incoming) => {
+                    let start = offset as usize;
+                    let name = OsStr::from_bytes(&self.names[start..start + len as usize]);
+                    match self.position(name) {
+                        Some(position) => match &mut self.entries[position].node {
+                            FileOrFolder::Folder(existing) => existing.merge_from(*incoming),
+                            FileOrFolder::File(_) => {
+                                unreachable!("a file and a folder cannot share one name")
+                            }
+                        },
+                        None => self.place(offset, len, FileOrFolder::Folder(incoming), false),
+                    }
+                }
+                file @ FileOrFolder::File(_) => self.place(offset, len, file, false),
+            }
+        }
+    }
+
     pub fn values(&self) -> impl Iterator<Item = &FileOrFolder> {
         self.entries.iter().map(|entry| &entry.node)
     }
