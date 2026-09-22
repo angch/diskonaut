@@ -114,11 +114,90 @@ fn deleting_a_nested_folder_updates_every_ancestor() {
 }
 
 mod hard_links {
-    use ::std::path::Path;
+    use ::std::path::{Path, PathBuf};
 
     use crate::model::HardLinks;
 
+    /// The old ledger, kept as the specification: compare paths component by component.
+    fn reference_charge(
+        seen: &mut Vec<(u64, u64, Vec<PathBuf>)>,
+        inode: u64,
+        size: u64,
+        directory: &Path,
+    ) -> Option<usize> {
+        let shared = |left: &Path, right: &Path| {
+            left.components()
+                .zip(right.components())
+                .take_while(|(l, r)| l == r)
+                .count()
+        };
+        match seen.iter_mut().find(|(i, _, _)| *i == inode) {
+            Some((_, seen_size, _)) if *seen_size != size => None,
+            Some((_, _, dirs)) => {
+                if dirs.iter().any(|d| d == directory) {
+                    return Some(directory.components().count());
+                }
+                let deepest = dirs.iter().map(|d| shared(d, directory)).max().unwrap_or(0);
+                dirs.push(directory.to_path_buf());
+                Some(deepest)
+            }
+            None => {
+                seen.push((inode, size, vec![directory.to_path_buf()]));
+                None
+            }
+        }
+    }
+
+    /// The interned ledger must answer exactly as the component-wise one does, in any order.
+    #[test]
+    fn interned_ledger_matches_component_wise_reference() {
+        let mut state = 0x9e37_79b9_7f4a_7c15u64;
+        let mut next = move |bound: u64| {
+            state = state
+                .wrapping_mul(6_364_136_223_846_793_005)
+                .wrapping_add(1_442_695_040_888_963_407);
+            (state >> 33) % bound
+        };
+        let names = ["a", "b", "c"];
+        let mut links = HardLinks::default();
+        let mut reference = Vec::new();
+        for _ in 0..20_000 {
+            let depth = next(5) as usize;
+            // Spelled the way a path might arrive, not only canonically: the old ledger compared
+            // component-wise, and the new one must agree on `a/b/`, `a/./b` and `a//b` too.
+            let mut dir = ::std::ffi::OsString::new();
+            for level in 0..depth {
+                if level > 0 {
+                    dir.push(["/", "//", "/./"][next(3) as usize]);
+                }
+                dir.push(names[next(3) as usize]);
+            }
+            if depth > 0 && next(4) == 0 {
+                dir.push("/");
+            }
+            let dir = PathBuf::from(dir);
+            let inode = next(40);
+            let size = 1024 * (1 + next(2));
+            assert_eq!(
+                links.charge(inode, size, &dir),
+                reference_charge(&mut reference, inode, size, &dir),
+                "inode {inode} size {size} in {}",
+                dir.display()
+            );
+        }
+        assert_eq!(links.tracked(), reference.len());
+    }
+
     /// `charge` returns the depth already accounted for, so folders below it still pay.
+    #[test]
+    fn spellings_of_one_directory_are_one_directory() {
+        let mut links = HardLinks::default();
+        assert_eq!(links.charge(1, 1024, Path::new("a/b")), None);
+        assert_eq!(links.charge(1, 1024, Path::new("a/b/")), Some(2));
+        assert_eq!(links.charge(1, 1024, Path::new("a//b")), Some(2));
+        assert_eq!(links.charge(1, 1024, Path::new("a/./b")), Some(2));
+    }
+
     #[test]
     fn first_sighting_charges_the_whole_path() {
         let mut links = HardLinks::default();

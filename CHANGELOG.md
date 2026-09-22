@@ -7,6 +7,14 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Changed
+
+- Tree building on Linux is about twice as fast and uses half the memory: hard-link accounting
+  works over interned directory ids instead of re-parsing paths, folders are boxed inside
+  `FileOrFolder` so a file's map slot no longer pays for a folder, and the folder and inode maps use
+  a fast non-cryptographic hasher. On a 2.2M-entry ext4 volume the app's load path went from ~5.2s
+  to ~2.4s, and peak RSS from ~870 MB to ~430 MB. See `docs/scan-performance.md`.
+
 ## [0.13.0] - 2026-09-04
 
 ### Changed

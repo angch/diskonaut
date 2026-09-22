@@ -56,7 +56,8 @@ Five concurrent threads communicate via bounded `mpsc` channels:
 - `model/files/file_tree.rs` — `FileTree`: hierarchical navigation, deletion tracking
 - `scan/mod.rs` — `scan_directories()`: per-directory batches, the seam every walker plugs into
 - `scan/bulk.rs` — macOS walker on `getattrlistbulk(2)` (see `docs/scan-performance.md`)
-- `model/files/hard_links.rs` — charges a hard-linked file to each folder once
+- `model/files/hard_links.rs` — charges a hard-linked file to each folder once, over interned directory ids
+- `model/files/hash.rs` — the fast hasher behind the folder and inode maps
 - `tiles/treemap.rs` — squarify algorithm (`HEIGHT_WIDTH_RATIO = 2.5`)
 - `tiles/board.rs` — `Board`: tile selection, zoom stack, navigation
 - `format/display_size.rs` — byte → human-readable (B/KB/MB/GB/TB)

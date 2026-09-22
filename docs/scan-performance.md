@@ -486,6 +486,77 @@ the parallel walk with concurrent tree building across an MPSC channel.
 5. **Pre-allocated channel batches**: Sized batch vectors and enlarged sync channel buffer to prevent worker stalls.
 6. **Symlink root canonicalization**: Ensured symlinked scan roots evaluate correctly under `dua-core` walker.
 
+### Second pass: the tree build was the bottleneck after all
+
+The first Linux pass left `pipeline` at 5.2s against a 2.4s `walk`: unlike macOS, the single
+tree-building thread was taking twice as long as the eight-thread walk it was consuming. With
+`perf` unavailable (`perf_event_paranoid=4`), timers around the three phases of
+`FileTree::add_relative_dir_entries` attributed the ~4.3s of consumer time on `/data`:
+
+| phase | time | what it is |
+| --- | --- | --- |
+| path prep | 0.09s | `strip_prefix`, component count |
+| hard-link charging | **3.0s** | `HardLinks::charge` for 726k links to 170k inodes |
+| tree insert | 1.2s | resolving the parent folder and inserting the entries |
+
+Hard-link charging dominated because `HardLinks` compared every new link against every folder
+already holding a link to the same inode, and each comparison parsed both paths component by
+component (`Path == Path` does that too, not a byte compare). With 13k inodes linked from 20 or more
+folders that is 5.1M path parses of ~15 components each.
+
+Three changes, measured old binary against new on the same tree back to back:
+
+| | before | after |
+| --- | --- | --- |
+| `tree` | 6.6–6.9s | 3.0–3.1s |
+| `pipeline` | 5.0–5.5s | 2.1–2.8s |
+| hard-link charging | 3.0s | 0.43s |
+| tree insert | 1.2s | 0.75s |
+| peak RSS (`pipeline`) | ~870 MB | ~430 MB |
+
+Entries, total size and hard-linked count are identical between the two binaries, and a
+randomised test (`model::tests::hard_links::interned_ledger_matches_component_wise_reference`)
+checks the new ledger against the old algorithm on 20,000 charges.
+
+1. **Directories are interned in `HardLinks`.** Each directory that holds a hard link is resolved
+   once to a `DirRef` (an index into a `parent`/`depth` table), and a link records that id rather
+   than a `PathBuf`. "How many leading components do these two folders share" becomes a
+   lowest-common-ancestor walk over integers, and "is this the same folder" an integer compare.
+   Interning is lazy — a directory with no hard links never touches the ledger — so the map of
+   paths to ids holds only the directories that need it.
+2. **`FileOrFolder::Folder` is boxed.** A `Folder` is 96 bytes; a `File` is 16. Every one of the
+   2.2M files was paying for the larger variant in its map slot (120 bytes with the key), so the
+   folder maps were ~2.5x bigger than they needed to be and inserts moved that much more memory.
+   The slot is now 48 bytes. This is where the RSS halved, and part of the insert speed-up.
+3. **A word-at-a-time hasher replaces `SipHash`** for the folder maps and the inode map
+   (`model/files/hash.rs`). Resolving a directory's parent chain costs a lookup per component, so
+   with 670k groups several components deep the tree build hashes several million names on top of
+   the 2.2M inserts. The hasher is seeded once per process: its step is invertible, and a scan of
+   `/` reads directories other users can write to, so an unseeded state would let them choose names
+   that all collide in one folder's map.
+
+A review of the change caught that the ledger first interned directories by their raw spelling,
+so `a/b` and `a/b/` were two folders where the old component-wise compare saw one; paths are now
+normalised through `components()` before lookup, and the randomised test generates the odd
+spellings too. The review also pointed out that the ledger's directory table duplicates what the
+`Folder` tree already resolves for the same batch. Storing a `DirRef` on each `Folder` would remove
+the path-keyed map and its per-directory allocation; left for a later pass, since only directories
+holding hard links are interned and it did not register in the timings.
+
+With these, `pipeline` sits at or just above `walk` — the consumer is hidden behind the walk
+again and further work on the model will not show in the app until the walker gets faster.
+
+Two things noticed and left alone, for whoever picks the walker up next:
+
+- The `dua-core` grouping yields **~670k directory groups for ~307k directories**: a directory's
+  entries arrive in more than one chunk (`ENTRY_CHUNK_SIZE = 4`, several workers), so its parent
+  is resolved and its hard-linked entries de-duplicated about twice as often as necessary. Harmless
+  for correctness, worth ~0.3s of the remaining consumer time. A Linux walker that emits one group
+  per directory would remove it.
+- Re-sweeping worker counts on this machine (8 cores, ext4, warm cache): 2 threads 5.1s, 4 threads
+  3.0s, 6 through 16 threads all within 2.2–2.9s of each other, with run-to-run noise of ±0.3s.
+  The cap of 8 is not wrong here, and there is no better number to replace it with.
+
 ## Known gaps
 
 - The reported total for `/` is ~706 GiB against 884 GiB used. The difference is APFS snapshots,

@@ -4,11 +4,15 @@ use ::std::path::{Path, PathBuf};
 
 use crate::scan::{EntryMeta, NamedEntry};
 
-pub type ContentsMap = ::std::collections::HashMap<OsString, FileOrFolder>;
+/// What a folder holds, by name.
+///
+/// A `Folder` is boxed so that the far more numerous files do not each pay for a folder's size:
+/// the map slot for a file is a name and a size rather than a name and an entire folder.
+pub type ContentsMap = super::hash::FastMap<OsString, FileOrFolder>;
 
 #[derive(Debug, Clone)]
 pub enum FileOrFolder {
-    Folder(Folder),
+    Folder(Box<Folder>),
     File(File),
 }
 
@@ -75,7 +79,7 @@ impl Folder {
                 if !folder.contents.contains_key(name) {
                     folder.contents.insert(
                         name.to_os_string(),
-                        FileOrFolder::Folder(Folder::from(name.to_os_string())),
+                        FileOrFolder::Folder(Box::new(Folder::from(name.to_os_string()))),
                     );
                 }
                 folder = match folder.contents.get_mut(name) {
@@ -87,7 +91,7 @@ impl Folder {
                 if !folder.contents.contains_key(name) {
                     folder.contents.insert(
                         name.to_os_string(),
-                        FileOrFolder::Folder(Folder::from(name.to_os_string())),
+                        FileOrFolder::Folder(Box::new(Folder::from(name.to_os_string()))),
                     );
                 }
             } else {
@@ -119,7 +123,7 @@ impl Folder {
             if !folder.contents.contains_key(name) {
                 folder.contents.insert(
                     name.to_os_string(),
-                    FileOrFolder::Folder(Folder::from(name.to_os_string())),
+                    FileOrFolder::Folder(Box::new(Folder::from(name.to_os_string()))),
                 );
             }
             folder = match folder.contents.get_mut(name) {
@@ -138,7 +142,7 @@ impl Folder {
                     folder.contents.entry(entry.name)
                 {
                     let name = slot.key().clone();
-                    slot.insert(FileOrFolder::Folder(Folder::from(name)));
+                    slot.insert(FileOrFolder::Folder(Box::new(Folder::from(name))));
                 }
             } else {
                 folder.contents.insert(

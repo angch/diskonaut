@@ -121,18 +121,16 @@ impl FileTree {
         size_at_depth.clear();
         size_at_depth.resize(depth + 1, 0);
         let mut normal_size = 0u128;
+        // Interned only if this directory turns out to hold a hard link; most do not.
+        let mut this_dir = None;
         for entry in &entries {
             if entry.meta.is_dir {
                 continue;
             }
             let size = u128::from(entry.meta.size);
             if entry.meta.is_hardlinked() {
-                let charged_down_to = hard_links.charge_with_depth(
-                    entry.meta.inode,
-                    entry.meta.size,
-                    relative_dir,
-                    depth,
-                );
+                let dir = *this_dir.get_or_insert_with(|| hard_links.directory(relative_dir));
+                let charged_down_to = hard_links.charge_in(entry.meta.inode, entry.meta.size, dir);
                 let first_uncharged = charged_down_to.map_or(0, |charged| charged + 1);
                 for folder_size in &mut size_at_depth[first_uncharged.min(depth + 1)..] {
                     *folder_size += size;
