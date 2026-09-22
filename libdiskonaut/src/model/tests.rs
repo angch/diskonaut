@@ -33,6 +33,11 @@ fn file_tree_delete_path() {
     let dir = std::env::temp_dir().join("diskonaut_model_test_delete");
     let _ = fs::remove_dir_all(&dir);
     fs::create_dir_all(&dir).expect("mkdir");
+    // Canonicalized because the app always scans a canonical path: `Opts::resolve_folder`
+    // resolves the folder before it reaches `FileTree`, which canonicalizes its own root too. On
+    // macOS `temp_dir()` is `/var/...`, a symlink to `/private/var/...`, so an uncanonicalized
+    // path here fails `strip_prefix` against that root and every entry is silently dropped.
+    let dir = dir.canonicalize().expect("canonicalize temp dir");
     let file_path = dir.join("gone.txt");
     let mut f = fs::File::create(&file_path).expect("create");
     f.write_all(b"x").expect("write");

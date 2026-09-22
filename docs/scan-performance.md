@@ -390,7 +390,7 @@ less than the numbers.**
 
 This is the part that does not carry over, and it is the important one.
 
-`getattrlistbulk(2)` returns **names and sizes together** in one call per directory-ful of entries.
+`getattrlistbulk(2)` returns **names and sizes together** in one call per directory's worth of entries.
 Linux has no such syscall. `getdents64(2)` returns names, inode numbers and a type hint (`d_type`),
 but **no size** — so a size still costs a `statx`/`fstatat` per file. The per-entry syscall that
 macOS avoids is unavoidable in the portable Linux path.

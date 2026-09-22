@@ -10,7 +10,11 @@ fn temp_scan_dir(name: &str) -> PathBuf {
     let dir = std::env::temp_dir().join(format!("diskonaut_scan_test_{name}"));
     let _ = std::fs::remove_dir_all(&dir);
     std::fs::create_dir_all(&dir).expect("create temp dir");
-    dir
+    // Canonicalized because the app always scans a canonical path: `Opts::resolve_folder`
+    // resolves the folder before it reaches `FileTree`, which canonicalizes its own root too. On
+    // macOS `temp_dir()` is `/var/...`, a symlink to `/private/var/...`, so an uncanonicalized
+    // path here fails `strip_prefix` against that root and every entry is silently dropped.
+    dir.canonicalize().expect("canonicalize temp dir")
 }
 
 #[test]
