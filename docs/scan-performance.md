@@ -1472,6 +1472,91 @@ Two measurements would close the file, neither takeable from here:
   the only regime where the answer above might be different.
 
 
+## btrfs and ZFS (2026-09-22)
+
+Same question as the section above, and the same answer, for the same reason: the scan is bound by
+the tree build at ~0.70s, the walk is 0.43s and already hidden, so anything that attacks the
+per-file `statx` is capped at about 3%. That arithmetic does not care which filesystem it is.
+
+Two things are nonetheless worth writing down, and one of them was a bug.
+
+### The bug: reflinks were invisible on every filesystem but the scan root's
+
+The probe was gated on `device == scan_device` — added, correctly, to stop a scan that wanders onto
+an NFS or FUSE mount from opening files there. But "is this the filesystem I started on" is the
+wrong question. The right one is "can this filesystem share extents", and the two differ exactly
+where it matters most:
+
+- **btrfs gives every subvolume and snapshot its own `st_dev`.** A btrfs root is one filesystem
+  presenting many device numbers, and subvolumes are where the sharing lives — snapshots share
+  everything by construction. Reflink accounting would have been off for all of it.
+- A second XFS volume mounted inside the scan is in the same position.
+
+Confirmed on the nested XFS mount on this machine (`/dev/sdd` under `/data`, `reflink=1`), by
+counting detections with and without a deliberately reflinked 150 MiB pair inside it:
+
+```
+before   with the pair 9305 reflinked   without it 9305   <- never seen
+after    with the pair 9306 reflinked   without it 9305   <- seen
+```
+
+The gate is now per filesystem, by `statfs` magic, decided once when the walk crosses into a mount
+and carried on the job — the same `statfs` that already decides whether a mount is a pseudo
+filesystem, so it costs nothing extra. NFS, SMB and FUSE are still never probed, now because they
+are not XFS or btrfs rather than because they are not the scan root.
+
+**Lifting that gate needed a second change.** With one filesystem in play, physical block offsets
+were unambiguous. Across several they are not: two unrelated files on two volumes sharing an offset
+and a size is an easy collision, and the ledger would merge them — the same undercount that keying
+on a single extent used to cause. The device is now folded into the extent identity before the
+extent map is.
+
+### btrfs `-x` reports almost nothing, and that is not a bug
+
+Because subvolumes carry distinct `st_dev`, `--one-file-system` on a btrfs root refuses to descend
+into any of them. That looks wrong, and the temptation is to compare `f_fsid` instead.
+
+Don't: **`du -x` compares `st_dev` too and stops in exactly the same places.** The documented
+contract is "like `du -x`", so this is consistent, and switching to `f_fsid` would make it
+inconsistent with the thing it claims to match. On a btrfs root, use the default rather than `-x`.
+
+### What is actually different about btrfs, for performance
+
+`BTRFS_IOC_TREE_SEARCH_V2` reads the filesystem B-trees directly, and unlike XFS's `BULKSTAT` it
+returns **names as well as inode items** — `DIR_INDEX` entries carry the name, `INODE_ITEM` the
+size and link count. It is therefore the only bulk-metadata interface in this whole investigation
+that is architecturally sufficient to replace *both* `getdents64` and `statx`, rather than serving
+as a size oracle that still needs a walk for the namespace.
+
+It is still capped at the ~3% above, and it is **believed** to require `CAP_SYS_ADMIN` like the
+other tree-search ioctls. That belief is *not verified here* — btrfs is compiled into this kernel
+but there is no btrfs volume to test against and mounting one needs root, so unlike every XFS claim
+in this document it rests on reading rather than on a probe. Treat it accordingly.
+
+Also worth dismissing, because it is the obvious thing to wonder: **btrfs qgroups** answer "how
+much does each subvolume hold" instantly, and `zfs list -o space` does the same for datasets. Both
+are far coarser than a treemap needs — they stop at the subvolume or dataset, not at the directory
+— so neither substitutes for a walk.
+
+### ZFS
+
+Nothing here is measured: OpenZFS is not installed on this machine, so the following is reasoning,
+not a result.
+
+- **No bulk-metadata ioctl** exposed for this purpose. `zdb` reads pool internals but is a
+  debugging tool that wants the pool quiescent.
+- **FIEMAP is not implemented**, so the reflink probe is correctly skipped — by construction, since
+  the magic list names only XFS and btrfs. Block cloning arrived in OpenZFS 2.2 and would be
+  invisible to this code, which is the honest limitation.
+- **Each dataset is its own `st_dev`**, so `-x` stops at dataset boundaries. Unlike btrfs
+  subvolumes this matches most people's expectations, and `du -x` again does the same.
+- **`.zfs/snapshot` is the hazard to know about.** It is hidden from readdir unless `snapdir=visible`,
+  but where it is visible, every snapshot appears as a subtree and each one *automounts on access* —
+  a scan would mount every snapshot and count the whole filesystem once per snapshot. The
+  `AT_NO_AUTOMOUNT` fix above stops merely stating them from triggering that; descending still
+  would. If ZFS support is ever taken seriously, `.zfs` belongs in the same category as `/proc`.
+
+
 ## Known gaps
 
 - The reported total for `/` is ~706 GiB against 884 GiB used. The difference is APFS snapshots,

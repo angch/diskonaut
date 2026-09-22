@@ -600,13 +600,26 @@ mod linux_walker {
     /// cannot tell them apart from a filesystem holding data.
     #[test]
     fn pseudo_filesystems_are_recognised() {
-        use crate::scan::linux::filesystem::is_pseudo;
-        assert!(is_pseudo(Path::new("/proc")), "/proc holds no disk usage");
-        assert!(is_pseudo(Path::new("/sys")), "/sys holds no disk usage");
-        assert!(!is_pseudo(Path::new("/")), "the root filesystem does");
+        use crate::scan::linux::filesystem::classify;
         assert!(
-            !is_pseudo(Path::new("/tmp")),
+            classify(Path::new("/proc")).pseudo,
+            "/proc holds no disk usage"
+        );
+        assert!(
+            classify(Path::new("/sys")).pseudo,
+            "/sys holds no disk usage"
+        );
+        assert!(!classify(Path::new("/")).pseudo, "the root filesystem does");
+        assert!(
+            !classify(Path::new("/tmp")).pseudo,
             "tmpfs holds real files and is counted, as du counts it"
+        );
+        // Reflink capability is a property of the filesystem, not of the scan root: this is what
+        // lets a second XFS volume, or a btrfs subvolume, be probed at all.
+        assert!(!classify(Path::new("/proc")).reflinks);
+        assert!(
+            classify(Path::new("/data")).reflinks || !cfg!(target_os = "linux"),
+            "/data is XFS with reflink=1 on this machine"
         );
     }
 

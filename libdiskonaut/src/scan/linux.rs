@@ -32,6 +32,10 @@ struct Job {
     /// The filesystem this directory lives on. An entry inside it reporting a different device is
     /// a mount point, which is the only place the walk has to decide whether to cross.
     device: u64,
+    /// Whether *this* filesystem can share extents between files, decided once when the walk
+    /// entered it. Not a property of the scan root: on btrfs every subvolume and snapshot is its
+    /// own `st_dev`, and they are precisely where the sharing is.
+    reflinks: bool,
 }
 
 struct Shared {
@@ -109,12 +113,7 @@ const WANTED: StatxFlags = StatxFlags::TYPE
     .union(StatxFlags::BLOCKS);
 
 /// Read one directory, returning its entries and the subdirectories to descend into.
-fn read_directory(
-    job: &Job,
-    options: &ScanOptions,
-    scan_device: u64,
-    probe_reflinks: bool,
-) -> (DirEntries, Vec<Job>) {
+fn read_directory(job: &Job, options: &ScanOptions, scan_device: u64) -> (DirEntries, Vec<Job>) {
     let mut entries = Vec::new();
     let mut children = Vec::new();
     let mut failed = 0u64;
@@ -193,16 +192,17 @@ fn read_directory(
         };
 
         let device = device_of(&stat);
-        // Only on the filesystem `statfs` was actually asked about. The walk crosses mount points
-        // by default, and probing means *opening* the file: on an NFS, SMB or FUSE mount reached
-        // part-way through a scan that can be slow or block outright, and nothing else in the scan
-        // opens user files at all.
-        let shared_extent = if probe_reflinks
-            && device == scan_device
+        // Only where the filesystem this directory sits on was found to support sharing at all —
+        // not merely where it is the scan root's. Probing means *opening* the file, so an NFS, SMB
+        // or FUSE mount reached part-way through a scan must not be probed: those are excluded by
+        // magic number rather than by device, which also lets btrfs subvolumes and a second XFS
+        // volume be probed, and they are exactly where the sharing lives.
+        let shared_extent = if job.reflinks
+            && device == job.device
             && kind == FileType::RegularFile
             && allocated >= reflink::PROBE_ABOVE_BYTES
         {
-            reflink::shared_identity(dir.as_fd(), name).unwrap_or(0)
+            reflink::shared_identity(dir.as_fd(), name, device).unwrap_or(0)
         } else {
             0
         };
@@ -213,18 +213,22 @@ fn read_directory(
             // the walk has a decision to make. Everything below it is on one filesystem, already
             // judged, so the `statfs` costs one call per mount rather than one per directory.
             let crossing = device != job.device;
-            let allowed = if crossing {
+            let (allowed, reflinks) = if crossing {
                 let same_filesystem = device == scan_device;
-                (!options.one_file_system || same_filesystem)
-                    && (same_filesystem || !filesystem::is_pseudo(&child))
+                let kind = filesystem::classify(&child);
+                (
+                    (!options.one_file_system || same_filesystem) && !kind.pseudo,
+                    kind.reflinks,
+                )
             } else {
-                true
+                (true, job.reflinks)
             };
             if allowed {
                 children.push(Job {
                     path: Arc::from(child.as_path()),
                     depth: job.depth + 1,
                     device,
+                    reflinks,
                 });
             }
         }
@@ -261,7 +265,6 @@ fn read_directory(
 mod reflink {
     use ::std::ffi::CStr;
     use ::std::os::fd::{AsRawFd, BorrowedFd};
-    use ::std::path::Path;
 
     use ::rustix::fs::{Mode, OFlags, openat};
 
@@ -274,9 +277,6 @@ mod reflink {
     const MAX_EXTENTS: usize = 64;
     /// `_IOWR('f', 11, struct fiemap)`, where `struct fiemap` is 32 bytes.
     const FS_IOC_FIEMAP: libc::c_ulong = 0xC020_660B;
-
-    const XFS_SUPER_MAGIC: u32 = 0x5846_5342;
-    const BTRFS_SUPER_MAGIC: u32 = 0x9123_683E;
 
     /// Below this, a file is not worth an `openat` and an `ioctl` to ask about.
     ///
@@ -308,20 +308,6 @@ mod reflink {
         extents: [Extent; MAX_EXTENTS],
     }
 
-    /// Whether this filesystem can share extents between files at all.
-    ///
-    /// Asking is worth it: on ext4, which cannot, this turns the whole probe off rather than
-    /// spending two syscalls per large file to be told `ENOTTY` every time.
-    pub fn possible_on(root: &Path) -> bool {
-        ::rustix::fs::statfs(root).is_ok_and(|fs| {
-            // Truncated, not widened: see `filesystem::magic_of`. Sign-extending a 32-bit
-            // `__fsword_t` would stop btrfs matching on 32-bit targets, silently turning the
-            // whole reflink feature off there.
-            let magic = super::filesystem::magic_of(&fs);
-            magic == XFS_SUPER_MAGIC || magic == BTRFS_SUPER_MAGIC
-        })
-    }
-
     /// An identity for `name`'s blocks, if every one of them is shared with another file.
     ///
     /// The first extent alone is not enough, and assuming it was is a way to *understate*. Two
@@ -336,7 +322,7 @@ mod reflink {
     ///
     /// Two files agreeing on this identity have the same extents at the same places, so they are
     /// the same blocks. The size check in the ledger still applies on top.
-    pub fn shared_identity(dir: BorrowedFd<'_>, name: &CStr) -> Option<u64> {
+    pub fn shared_identity(dir: BorrowedFd<'_>, name: &CStr, device: u64) -> Option<u64> {
         let file = openat(
             dir,
             name,
@@ -363,12 +349,16 @@ mod reflink {
             return None;
         }
 
-        // FNV-1a over the extent map. A collision would need two different layouts to agree here
-        // *and* the two files to be the same size, which the ledger checks separately.
+        // FNV-1a over the device and then the extent map. The device has to be in there: a
+        // physical block offset means nothing without the filesystem it indexes, and the walk now
+        // probes every sharing filesystem it meets rather than only the scan root's. Two unrelated
+        // files on two volumes sharing an offset and a size is otherwise an easy collision, and it
+        // would merge them — the same undercount that keying on one extent used to cause.
         let mut identity: u64 = 0xcbf2_9ce4_8422_2325;
         let mut fold = |value: u64| {
             identity = (identity ^ value).wrapping_mul(0x0000_0100_0000_01b3);
         };
+        fold(device);
 
         let mut saw_last = false;
         for extent in &request.extents[..mapped] {
@@ -431,11 +421,39 @@ pub(crate) mod filesystem {
     // different argument and does not belong in the same list. Merely *stating* an autofs
     // placeholder does not mount it, because the walk passes `AT_NO_AUTOMOUNT`.
 
-    /// Whether `path` is the root of a filesystem that only looks like it holds data.
+    /// Magic numbers of filesystems that can share extents between files.
+    const REFLINK: &[u32] = &[
+        0x5846_5342, // xfs
+        0x9123_683e, // btrfs
+    ];
+
+    /// What the walk needs to know about a filesystem, from one `statfs`.
+    #[derive(Clone, Copy, Debug)]
+    pub struct Kind {
+        /// Reports no meaningful disk usage; not worth descending into.
+        pub pseudo: bool,
+        /// Can share extents between files, so reflinks are worth looking for.
+        pub reflinks: bool,
+    }
+
+    /// Classify the filesystem `path` sits on.
     ///
-    /// Asked once per mount point crossed, never per entry.
-    pub fn is_pseudo(path: &Path) -> bool {
-        ::rustix::fs::statfs(path).is_ok_and(|fs| PSEUDO.contains(&magic_of(&fs)))
+    /// Asked once per mount point crossed, never per entry. A filesystem that cannot be asked is
+    /// treated as ordinary and non-sharing, which descends into it but does not open its files.
+    pub fn classify(path: &Path) -> Kind {
+        ::rustix::fs::statfs(path).map_or(
+            Kind {
+                pseudo: false,
+                reflinks: false,
+            },
+            |fs| {
+                let magic = magic_of(&fs);
+                Kind {
+                    pseudo: PSEUDO.contains(&magic),
+                    reflinks: REFLINK.contains(&magic),
+                }
+            },
+        )
     }
 
     /// A filesystem's magic number as an unsigned 32-bit value.
@@ -501,8 +519,6 @@ pub fn walk_linux(root: &Path, threads: usize, options: ScanOptions) -> LinuxWal
     let root: PathBuf = root.canonicalize().unwrap_or_else(|_| root.to_path_buf());
     let root: Arc<Path> = Arc::from(root.as_path());
 
-    // Always resolved, not only under `-x`: the reflink probe is scoped to this filesystem even
-    // when the walk is allowed to leave it.
     let scan_device = statx(
         rustix::fs::CWD,
         root.as_os_str(),
@@ -517,6 +533,7 @@ pub fn walk_linux(root: &Path, threads: usize, options: ScanOptions) -> LinuxWal
             path: Arc::clone(&root),
             depth: 0,
             device: scan_device,
+            reflinks: filesystem::classify(&root).reflinks,
         }]),
         ready: Condvar::new(),
         queued: AtomicUsize::new(1),
@@ -531,21 +548,13 @@ pub fn walk_linux(root: &Path, threads: usize, options: ScanOptions) -> LinuxWal
 
     let threads = threads.max(1);
     let donate_below = threads;
-    let probe_reflinks = reflink::possible_on(&root);
 
     let workers = (0..threads)
         .map(|_| {
             let shared = Arc::clone(&shared);
             let sender = sender.clone();
             ::std::thread::spawn(move || {
-                worker(
-                    &shared,
-                    &sender,
-                    options,
-                    scan_device,
-                    probe_reflinks,
-                    donate_below,
-                )
+                worker(&shared, &sender, options, scan_device, donate_below)
             })
         })
         .collect();
@@ -569,7 +578,6 @@ fn worker(
     sender: &SyncSender<Vec<DirEntries>>,
     options: ScanOptions,
     scan_device: u64,
-    probe_reflinks: bool,
     donate_below: usize,
 ) {
     let mut local: Vec<Job> = Vec::new();
@@ -586,7 +594,7 @@ fn worker(
     }
 
     while let Some(job) = local.pop().or_else(|| shared.steal()) {
-        let (directory, children) = read_directory(&job, &options, scan_device, probe_reflinks);
+        let (directory, children) = read_directory(&job, &options, scan_device);
 
         // `max(1)` so that a run of empty directories still flushes. Counting only entries, a
         // worker walking a wide tree of empty directories would hold every one of them until it

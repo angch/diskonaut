@@ -63,6 +63,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - Scanning no longer triggers automounts. The walk's `statx` lacked `AT_NO_AUTOMOUNT`, which
   `stat`/`lstat`/`fstatat` imply but `statx` does not, so merely stating an autofs placeholder
   mounted it — a directory of NFS home maps would have been mounted wholesale.
+- Reflinks are now found on every filesystem that supports them, not only the one the scan started
+  on. The probe was gated on the scan root's device, which meant it never fired inside a btrfs
+  subvolume or snapshot — where sharing is the norm — nor on a second XFS volume mounted inside the
+  scan. It is gated on the filesystem's type instead, so NFS, SMB and FUSE are still never opened.
 - Sizes no longer count copy-on-write shared data twice. On XFS and btrfs a reflinked copy reports
   its full block usage with a link count of 1, so tools that de-duplicate on inode — including
   `du` — charge every copy in full. A scan of a `uv` package cache reported 15.1 GiB where 12.0 GiB
