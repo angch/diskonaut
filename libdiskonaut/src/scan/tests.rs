@@ -370,7 +370,7 @@ fn hard_links_count_once_per_folder_when_nested() {
             .unwrap_or_else(|| panic!("{path:?} should exist"))
         {
             crate::FileOrFolder::Folder(folder) => folder.size,
-            crate::FileOrFolder::File(file) => file.size,
+            crate::FileOrFolder::File(file) => u128::from(file.size),
         }
     };
 

@@ -20,14 +20,20 @@ impl FileOrFolder {
     pub fn size(&self) -> u128 {
         match self {
             FileOrFolder::Folder(folder) => folder.size,
-            FileOrFolder::File(file) => file.size,
+            FileOrFolder::File(file) => u128::from(file.size),
         }
     }
 }
 
+/// A file, as the tree holds it.
+///
+/// `size` is a `u64` and not a `u128` deliberately. It is the single most repeated field in the
+/// model — one per file, millions of them — and it decides the size of `FileOrFolder`, which is
+/// what every slot in every folder costs. At `u128` the enum is 24 bytes; at `u64` it is 16. A
+/// `u64` counts to 16 EiB, which no file and no volume reaches.
 #[derive(Debug, Clone, Copy)]
 pub struct File {
-    pub size: u128,
+    pub size: u64,
 }
 
 #[derive(Debug, Clone)]
@@ -95,9 +101,10 @@ impl Folder {
                     );
                 }
             } else {
-                folder
-                    .contents
-                    .insert(name.to_os_string(), FileOrFolder::File(File { size }));
+                folder.contents.insert(
+                    name.to_os_string(),
+                    FileOrFolder::File(File { size: meta.size }),
+                );
             }
         }
     }
@@ -148,7 +155,7 @@ impl Folder {
                 folder.contents.insert(
                     entry.name,
                     FileOrFolder::File(File {
-                        size: u128::from(entry.meta.size),
+                        size: entry.meta.size,
                     }),
                 );
             }
