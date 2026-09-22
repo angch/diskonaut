@@ -1,8 +1,13 @@
 # Scan performance
 
-Notes from making a whole-disk scan fast enough to be worth waiting for, and a plan for repeating
-the exercise on Linux. Everything below was measured with the `--benchmark` harness that ships in
-the binary, so the numbers are reproducible rather than remembered.
+Notes from making a whole-disk scan fast enough to be worth waiting for, on macOS first and then on
+Linux. Everything below was measured with the `--benchmark` harness that ships in the binary, so the
+numbers are reproducible rather than remembered.
+
+Read in order, the file is a record of being wrong in useful ways: the macOS findings at the top
+set expectations for Linux that the Linux measurements then contradicted. Where a later section
+supersedes an earlier one there is a note saying so — the earlier claim is kept rather than edited
+away, because what looked true and why is the useful part.
 
 ## Test machine
 
@@ -53,10 +58,14 @@ The stages nest, so subtracting one from the next attributes cost to a layer:
 | `dua-tree` | that walk feeding the folder tree |
 | `walk` | the walk diskonaut uses now, alone |
 | `tree` | that walk feeding the folder tree |
+| `tree-only` | the folder tree alone — entries are collected first, untimed, then fed to the model |
 | `pipeline` | scan and tree build on separate threads, as the app runs them |
 
 `dua-*` against the others is a like-for-like walker comparison on the same tree. `walk` against
 `tree` is the cost of the data model. `tree` against `pipeline` is the cost of the channel.
+`tree-only` is the model's cost with the walk taken out of the measurement entirely — use it rather
+than the `walk`/`tree` subtraction, which on Linux conflates the model with the walk stalling
+behind a busy consumer.
 
 Useful alongside it: `/usr/bin/time -l` (macOS) or `/usr/bin/time -v` (Linux) to see the
 user/system split. That split is what turned out to matter most.
@@ -159,8 +168,14 @@ costs ~28µs per entry.
 For comparison, `find ~/project | wc -l` over a 3M-entry tree used ~3 cores and 17.7s of system
 time, and finished in 6.3s — less kernel time than our 14-thread run and faster wall-clock.
 
-`thread_count()` therefore caps workers at `min(cores, 8)`. **This cap is a macOS/APFS measurement
-and should be re-derived on Linux**, where the contention profile of ext4/xfs/btrfs is different.
+`thread_count()` therefore caps workers at `min(cores, 8)`.
+
+> **The explanation here does not hold on Linux — see "Linux XFS" below.** On a 32-core Linux box
+> the same cliff appears on both XFS and ext4, but 16 *independent* walker processes scale to 13.3M
+> entries/s against the same tree, so the kernel and the filesystem are not the limit; jwalk's
+> thread model is. The cap is still worth keeping; the reason given for it is not the reason.
+
+**This cap is a macOS/APFS measurement and should be re-derived on Linux**, where the contention profile of ext4/xfs/btrfs is different.
 
 ### 4. The lean attribute set was not, by itself, the win
 
@@ -424,6 +439,13 @@ directly rather than asking about files one at a time).
   a capability check with the generic path as the fallback — if they are pursued at all. Verify the
   details against current man pages; they are cited here from background knowledge, not tested.
 
+> **Tested since, and mostly wrong — see "Linux XFS" below.** io_uring `statx` is 3.8x *slower*
+> than a plain `statx`, not the best win; the minimal mask, `AT_STATX_DONT_SYNC` and `d_type`-based
+> stat elision are all worth nothing measurable; `XFS_IOC_BULKSTAT` is indeed `EPERM` unprivileged
+> *and* returns no paths, so it cannot replace a walker; and `XFS_IOC_GETFSMAP` is the exception to
+> "all of these need root" — it is callable by any user, but redacts every owner, which makes it
+> useless for this purpose by a different route.
+
 ### Correctness requirements on Linux
 
 The firmlink problem is macOS-only, but duplicated and runaway traversal have Linux analogues, and
@@ -453,6 +475,12 @@ UI — is unchanged. Add a `linux-*` benchmark stage next to the `dua-*` ones so
 walkers can be compared on the same tree in one run, which is what made the macOS work tractable.
 
 ## Linux ext4 performance & allocator pressure
+
+> **Stale as of 2026-09-22.** The `/data` this section measured was ext4 with ~2.24M entries. The
+> path now holds an XFS filesystem with ~4.23M entries on different hardware, so none of the
+> numbers below are comparable with the XFS section that follows. The *changes* described here are
+> still in the code and still correct; only the measurements are of a filesystem that no longer
+> exists at that path.
 
 On Linux (ext4, ~2.24M entries, ~170k hard-linked files on `/data`), `dua-tree` initially outperformed
 diskonaut's tree building because of allocator pressure in the model and hard link accounting.
@@ -638,6 +666,694 @@ or knocked down rather than rediscovered. Test with a FAT stick and a loopback `
   `--threads 1/2/4/8` sweep before the constant is touched.
 - **exFAT on Linux** is a separate driver (`exfat`, not `vfat`) and, like macOS's, is expected to
   be fine. Worth one confirming run, not more.
+
+## Linux XFS: where the time actually goes (2026-09-22)
+
+The exercise the "Repeating this on Linux" section set up — repeat the macOS walker work on
+Linux, and look for an XFS bulk-metadata path — run against a real XFS volume. The short version
+is that **the XFS-specific ideas are all dead ends without root, and the scan's remaining cost is
+the walker's thread model**, which is not an XFS matter at all. The tree build is 0.85s of a 2.4s
+scan, and the walk is the rest. Both halves are measured below.
+
+It also turned up a correctness bug that has nothing to do with speed: XFS reflink sharing is
+present on this volume and the model over-counts it (section 6).
+
+### Test machine
+
+| | |
+| --- | --- |
+| Hardware | 32 cores, 38 GiB RAM |
+| OS | Linux 6.8.0-124-generic (Ubuntu 24.04) |
+| Filesystem | XFS on `/dev/bcache0`, 8 TiB volume, 915 GiB used |
+| `xfs_info` | `agcount=8`, `crc=1`, `finobt=1`, `sparse=1`, `rmapbt=1`, `reflink=1`, `bigtime=1`, `ftype=1`, `inode64`, `bsize=4096` |
+| Nested mount | `/data/home/angch/project/myalamat-db` — a subtree mount of a second XFS (`/dev/sdd`) |
+| Privilege | ordinary user, uid 1000, no `sudo` |
+
+The tree: **4,228,429 entries**, 12 unreadable, 21,791 distinct hard-linked files, 806.8 GiB
+reported (745.9 GiB with `-x`). `df -i` reports 4,217,342 inodes in use, and the ~11k excess is
+the extra names of the hard-linked files — so nothing is being traversed twice. The 61 GiB
+difference `-x` makes is the nested mount, which holds two multi-gigabyte tarballs and five other
+entries; that is why excluding it moves the total by 61 GiB while moving the entry count by 5.
+
+Everything below is warm-cache. "Warm" is not a guess here: `/proc/diskstats` shows **zero sectors
+read from `bcache0` during a full scan**, so the whole 4.2M-inode working set is resident and every
+number is CPU and kernel time, not I/O. A cold scan of this volume was not measured and would be a
+different problem.
+
+### Baseline
+
+Default settings (8 threads), two runs of every stage:
+
+```
+dua-walk      4.999s / 4.202s    4228416 entries    896.0 GiB
+dua-tree     10.388s /10.814s    4228417 entries    806.8 GiB   21791 hard-linked
+walk          3.028s / 3.024s    4228424 entries    896.0 GiB
+tree          7.026s / 7.929s    4228424 entries    806.8 GiB   21791 hard-linked
+pipeline      2.932s / 3.116s    4228424 entries    806.8 GiB   21791 hard-linked
+```
+
+`/usr/bin/time -v` on `pipeline`: **5.32s user against 9.52s system**, 745 MB peak RSS, 483,793
+voluntary context switches. System time dominates, as on macOS, but only by 1.8x rather than 26x.
+
+### 1. Thread count: 6 is better than 8, and past 8 it falls off a cliff
+
+`pipeline`, `/data`, three runs each:
+
+| threads | 1 | 2 | 4 | 5 | 6 | 7 | 8 | 10 | 12 | 16 | 24 | 32 | 48 |
+| --- | --- | --- | --- | --- | --- | --- | --- | --- | --- | --- | --- | --- | --- |
+| time | 11.40s | 5.25s | 2.92s | 2.50s | 2.48s | **2.26s** | 2.53s | 4.18s | 5.75s | 6.53s | 6.85s | 6.81s | 6.96s |
+
+`MAX_SCAN_THREADS = 8` lands on the shoulder of the cliff rather than at the optimum, and 10
+threads is already 85% slower than 7. On a 32-core machine the default (`min(cores, 8)`) is
+therefore doing real work — without the cap this scan would run at 6.8s instead of 2.5s.
+
+5 through 8 are within noise of each other (2.26–2.65s across runs), so this does not justify
+retuning the constant to a precise value. It does justify not raising it.
+
+### 2. The cliff is not XFS, and it is not the kernel — it is the walker's thread model
+
+This is the finding that matters, and it contradicts finding #3 above.
+
+**Control on another filesystem.** The same sweep on `/` (ext4 on `/dev/sda2`, 303,805 entries,
+`-x`), `walk` stage:
+
+| threads | 2 | 4 | 6 | 8 | 12 | 16 | 24 |
+| --- | --- | --- | --- | --- | --- | --- | --- |
+| time | 0.403s | 0.230s | **0.167s** | 0.191s | 0.389s | 0.453s | 0.474s |
+
+Identical shape: optimum at 6, cliff after 8, ~2.7x worse by 16 threads. Whatever this is, it is
+not an XFS property.
+
+**Does the kernel scale?** Run N *independent* single-threaded walkers over the same tree at once
+(`docs/probes/statbench.c`, mode 1) and measure aggregate throughput:
+
+| concurrent processes | 1 | 4 | 8 | 16 |
+| --- | --- | --- | --- | --- |
+| wall clock | 4.38s | 4.67s | 4.84s | 5.09s |
+| aggregate | 965k/s | 3.62M/s | 6.99M/s | **13.3M entries/s** |
+
+Sixteen processes hammering the *same* inodes get 13.8x the throughput of one, for a 16%
+wall-clock penalty. XFS, the dcache and the VFS scale essentially linearly here. The premise of
+finding #3 — "past a handful of workers the extra workers spend their time contending on
+filesystem locks" — is simply not true on this machine.
+
+**So it is the walker.** `docs/probes/mtwalk.c` is a deliberately naive in-process parallel walker:
+one global mutex, a LIFO queue of directory fds, N pthreads, `getdents64` + `fstatat` per entry, no
+work stealing. 90 lines. It reports the same 4,228,423 entries, the same 896.0 GiB and the same 12
+failures as diskonaut.
+
+**Read the table for its shape, not its multiple.** `mtwalk` is doing a strictly smaller job than
+the Rust walker: it never allocates a name (it passes `d_name` straight to `fstatat` and keeps
+subdirectory *file descriptors*, not paths), it builds no `NamedEntry`, no `Vec`, no `Arc<Path>`
+group, and it hands nothing downstream. This document's own ext4 section records that removing 2.2M
+`OsString` allocations was worth measuring, so 4.2M of them are not free. It also holds an open fd
+for every discovered-but-unvisited directory — it needs `ulimit -n 65536` — which a shipped walker
+cannot do; opening lazily costs an extra `openat` per descent. So 0.387s is a floor no real walker
+will reach.
+
+| threads | 1 | 4 | 6 | 8 | 12 | 16 | 24 | 32 |
+| --- | --- | --- | --- | --- | --- | --- | --- | --- |
+| mtwalk | 4.408s | 1.185s | 0.831s | 0.633s | 0.510s | 0.465s | **0.387s** | 0.395s |
+| diskonaut `walk` | — | 2.896s | 2.216s | 2.558s | 6.340s | 6.647s | — | — |
+
+What the table does establish is the **scaling shape**, and allocation cannot explain a *collapse*:
+`mtwalk` improves monotonically to 24 threads while `dua-core` peaks at 6 and is 3x worse by 16.
+Together with the 16-process result above — the kernel delivering 13.3M entries/s — that is enough
+to say the limiter is jwalk's thread model, not XFS, not the kernel, and not the syscalls.
+
+A real replacement therefore lands somewhere between 0.39s and 2.2s at its best thread count, and
+where in that range is unmeasured. It does not need to be near the bottom of it: section 5 measures
+the tree build at 0.85s, so anything under ~0.9s already makes the model the binding constraint.
+
+On Linux every benchmark stage goes through `dua-core` — `bulk` is macOS-only, and
+`fallback::group_by_directory` groups the same `dua-core` walk — so `dua-walk` and `walk` measure
+the same underlying jwalk traversal. The collapse past 8 threads lives in there, not in XFS.
+
+### 3. The per-entry stat is 78% of the walk, and nothing portable makes it cheaper
+
+`docs/probes/statbench.c` — one process, one thread, `getdents64` recursion, varying only what it
+asks per entry. Two passes over `/data`:
+
+| strategy | time | ns/entry |
+| --- | --- | --- |
+| `getdents64` only (names + `d_type`) | 0.95s / 0.93s | 220 |
+| `fstatat(AT_SYMLINK_NOFOLLOW)` | 4.30s / 4.50s | 1017–1063 |
+| `statx`, minimal mask (`TYPE\|MODE\|INO\|NLINK\|BLOCKS`) | 4.47s / 4.46s | 1055 |
+| `statx` + `AT_STATX_DONT_SYNC` | 4.56s / 4.28s | 1012–1079 |
+| `fstatat`, skipping the 385k directories | 4.55s / 4.16s | 984–1075 |
+| `io_uring` batched `statx`, queue depth 512 | 16.91s | 3998 |
+| `io_uring` batched `statx` + `DONT_SYNC` | 16.71s | 3952 |
+
+GNU `find` as an outside check: `find /data -printf '.'` 1.67s, `find /data -printf '%s.'` 5.23s.
+
+Three of the four candidates the previous section proposed are now measured, and all three are
+worth nothing:
+
+- **A minimal `statx` mask does nothing.** XFS populates the whole in-core inode either way; asking
+  for less does not let it do less.
+- **`AT_STATX_DONT_SYNC` does nothing.** There is nothing to revalidate on a local filesystem.
+- **Trusting `d_type` to skip stats does nothing measurable.** It removes 9% of the calls (385k of
+  4.23M) and the result is inside run-to-run noise. It is also not applicable as stated: diskonaut
+  counts a directory's own blocks, so it needs the directory's size too.
+- **`io_uring` batched `statx` is 3.8x *slower*.** This was ranked "probably the best
+  portable-in-practice win" and it is the worst option measured. `IORING_OP_STATX` is a blocking
+  opcode: the ring hands each request to an `io-wq` kernel worker, and for a warm-cache metadata
+  lookup that handoff costs several times the syscall it replaces. io_uring wins on operations that
+  actually block; a cached `statx` does not block.
+
+`ftype=1` is set on this volume, so `d_type` is always populated — `getdents64` returned
+**zero** `DT_UNKNOWN` entries across 4.23M.
+
+The honest reading: at ~1µs per entry, warm, the stat is real VFS and XFS work, not syscall entry
+overhead. Batching the syscall cannot help because the syscall is not the cost. What *does* help is
+doing those microseconds on more cores at once — which is finding 2, not an XFS question.
+
+### 4. The XFS bulk-metadata ioctls, tested
+
+Both were probed directly rather than taken from the man pages.
+
+**`XFS_IOC_BULKSTAT` — `EPERM`.** `docs/probes/bulkstat_probe.c` opens `/data` and issues the v5
+ioctl as uid 1000:
+
+```
+XFS_IOC_FSGEOMETRY: ok
+XFS_IOC_BULKSTAT as uid 1000: FAILED errno=1 (Operation not permitted)
+```
+
+`FSGEOMETRY` succeeding on the same descriptor rules out the fd or the struct layout being at
+fault. Bulkstat is `CAP_SYS_ADMIN`-gated on 6.8, as the previous section guessed.
+
+Worth stating plainly, because the previous section calls bulkstat "the nearest thing Linux has to
+reading the metadata table directly" without the caveat: **bulkstat returns inode records, not
+paths.** No name, no parent. It cannot replace a walker for a treemap — the only shape that works
+is `getdents64` for the namespace (names, `d_ino`, `d_type`) plus bulkstat as a bulk inode→size
+oracle joined on inode number. That is a much larger change than dropping a walker into
+`scan_directories()`, it needs a separate ioctl per filesystem (so the nested `myalamat-db` mount
+needs its own), and per section 3 its entire ceiling is the ~3.4s of stat time.
+
+**`XFS_IOC_GETFSMAP` — succeeds, and is useless.** This one is the surprise, in both directions.
+It is *not* `CAP_SYS_ADMIN`-gated: as uid 1000 it walked the whole 8 TiB device in **25 ioctl calls,
+99,822 records, 0.002 seconds**. The reverse-mapping btree (`rmapbt=1` here) really does answer
+"what owns this block" at memory speed.
+
+But every record comes back with `FMR_OF_SPECIAL_OWNER` set and an owner of `FMR_OWN_UNKNOWN` (2)
+or `FMR_OWN_FREE` (1). Not one inode number in 99,822 records:
+
+```
+dev=64256 phys=0         len=634880   owner=2 flags=0x10
+dev=64256 phys=634880    len=4096     owner=1 flags=0x10
+dev=64256 phys=638976    len=38641664 owner=2 flags=0x10
+...
+LAST flag seen
+batches=25 records=99822  last physical end=8796092989440 (8192.0 GiB)
+```
+
+The record count corroborates this: **99,822 records for a volume holding 4.2M inodes.** If owners
+were real, adjacent extents belonging to different files could not be merged and the count would be
+in the millions; collapsing every owner to `OWN_UNKNOWN` is exactly what lets them coalesce. The
+mechanism is therefore inferred from the ioctl's behaviour, not read from the kernel source, but
+both the owner values and the record count point the same way: ownership is redacted for
+unprivileged callers, presumably so that any user cannot map out the sizes and layout of every
+other user's files. An unprivileged caller learns which blocks are free and which are not, and
+nothing about whose they are. As a size oracle it is worthless; as a "how
+fragmented / how full is this volume" answer it is instant.
+
+Under root it should return real inode numbers, which would make the `getdents64` + fsmap join in
+section 4 viable and is the one number this exercise could not obtain. `docs/probes/fsmap_scan.c`
+already accumulates blocks per owning inode and prints the distinct-inode count; running it as root
+is the remaining measurement.
+
+**ext4** has no supported userspace bulk-metadata API, as previously noted, so a bulk path would
+cover XFS only — behind a capability check, with the generic walker as the fallback, for a ceiling
+that section 3 shows is smaller than the walker win.
+
+### 5. What to do
+
+In order of measured value. **Items 1 and 2 were done on the same day — see "The native Linux
+walker" below for what they cost and what they bought.**
+
+1. ~~**Fix the reflink over-count**~~ (section 6). It is a wrong number, not a slow one. *Done.*
+2. ~~**Replace the `dua-core`/jwalk Linux walker**~~ *Done.* with a directory-parallel walker built on
+   `getdents64` + `fstatat`, feeding the existing `DirEntries` seam. Unlike every other candidate
+   here it needs no privilege, no new dependency and no filesystem-specific code — it would help
+   ext4 and btrfs too. It also removes the "~670k groups for ~307k directories" waste noted earlier,
+   since a walker that owns its own enumeration emits one group per directory.
+
+   The size of the prize is now measured rather than guessed. The new `tree-only` stage collects
+   every directory first, untimed, then times only the model:
+
+   ```
+   tree-only     0.822s / 0.853s / 0.865s   4228430 entries   806.8 GiB   21791 hard-linked
+   ```
+
+   The tree build is **0.85s** — 4.97M entries/s, and identical totals to every other stage, so it
+   is doing the whole job. (Superseded: fed by the native walker's one group per directory instead
+   of `dua-core`'s ~2.2 groups per directory, the same stage reads 0.37–0.51s. Take the lower
+   figure as the model's cost and this one as the model's cost *plus* the grouping waste. The stage
+   is also distorted — see the following section's known gaps.) Against `pipeline` at 2.37–2.52s and `walk` at 2.22–2.32s, the split is
+   roughly 2.2s of walk hiding 0.85s of model. A walker landing anywhere under ~0.9s makes the tree
+   build the binding constraint, so the realistic end-to-end target is **~2.4s → ~1.0s, about
+   2.5x** — not the 5.6x the walk stage alone suggests.
+3. **Leave `MAX_SCAN_THREADS` at 8.** It is on the shoulder rather than the peak, but 5–8 are within
+   noise and the cap is what keeps a 32-core machine off the 6.8s cliff. Revisit only after the
+   walker is replaced, since the cliff is the walker's and a new walker will have a different curve
+   — `mtwalk` was still improving at 24 threads.
+4. **Do not spend further effort on the model.** At 0.85s for 4.2M entries it is no longer the
+   bottleneck and will not become one until the walker is roughly 2.5x faster.
+5. **Do not pursue io_uring, `statx` masks, `DONT_SYNC`, or `d_type`-based stat elision.** All four
+   are measured at zero or negative value above.
+6. **Do not pursue bulkstat or GETFSMAP** for the scan. Both are root-only in the form that would
+   help, both are XFS-only, and both are capped by a stat cost smaller than the walker win.
+
+### 6. Reflink sharing is real here, and the model over-counts it
+
+`reflink=1` is enabled on this volume, and unlike `reflink=1` on an idle filesystem, it is **in
+use**. Checking 200 files over 50 MB with `filefrag -v` (unprivileged, no root needed — the claim
+that this needed a root run was wrong):
+
+```
+  block size 4096
+  shared 18.20 GiB of 61.69 GiB across the sample (29.5%)
+```
+
+The sharers are `uv`'s package cache — `~/.cache/uv/archive-v0/**` holds reflinked copies of large
+CUDA, cuDNN, Torch and Playwright binaries, and `uv` reflinks from there into each project's
+virtualenv:
+
+```
+4    shared  /data/home/angch/.cache/uv/archive-v0/isUXovQuEaGC7fkl5QdqH/nvidia/cu13/lib/libcusolver.so.12
+3    shared  /data/home/angch/.cache/uv/archive-v0/X0ppwh-44oKKYjNcdAZiz/nvidia/nccl/lib/libnccl.so.2
+1    shared  /data/home/angch/.cache/uv/archive-v0/svekiP7w12JJm5lx4U0Fv/torch/lib/libtorch_cuda.so
+```
+
+Copy-on-write shared extents are allocated once but **each sharing file reports the full
+`st_blocks`, and `nlink` stays 1** — so `HardLinks`, which keys on inode and link count, cannot see
+them. Every reflinked copy inside a scan is charged in full. `cp --reflink`, `uv`, container image
+stores and snapshot tooling all produce this, on btrfs as well as XFS, so it is not an exotic case.
+
+That sample is not random — it is the first 200 large files `find` returned, heavily weighted to
+the uv cache — so **29.5% is not a whole-volume figure** and should not be extrapolated. What it
+does establish is that the effect is present and large where it occurs, which is enough to call the
+number wrong.
+
+It does not show up in the whole-volume total: the scan reports 745.9 GiB against `df`'s 915.3 GiB
+for this device, so it is *under* `df` overall. Eleven unreadable directories (two container
+Postgres/MySQL `pgdata` trees, `drwx------` under other uids) sit inside that gap and more than
+offset the over-count. The user-visible damage is local — point diskonaut at `~/.cache/uv` or a
+virtualenv and the answer is inflated, and "delete this to free 15 GB" is not true.
+
+Unprivileged `GETFSMAP` reported zero `FMR_OF_SHARED` records, which given the redaction in section
+4 is now confirmed to be an artefact of the redaction rather than evidence of absence — a useful
+check on that inference.
+
+The fix has the same shape as `HardLinks`: dedupe on physical extent rather than on inode, which
+means FIEMAP (`FS_IOC_FIEMAP`) per file and charging each shared extent to a folder once. That is a
+per-file ioctl on top of the per-file stat, so it would want to be opt-in, or restricted to files
+whose `st_blocks` suggests sharing is plausible. Scoping it is a separate exercise; recording it
+here because by this document's own standard (finding #5) a wrong number outranks a slow one.
+
+### Reproducing
+
+```sh
+cargo build --release
+./target/release/diskonaut --benchmark --bench-stage all --bench-repeat 2 /data
+./target/release/diskonaut --benchmark --bench-stage tree-only --bench-repeat 3 /data
+for t in 1 2 4 6 8 12 16 24 32; do
+  ./target/release/diskonaut --benchmark --bench-stage pipeline --threads $t /data | tail -1 |
+    sed "s/^/threads=$t /"
+done
+
+cd docs/probes
+gcc -O2 -o statbench statbench.c            # modes 0..6, see the table in section 3
+gcc -O2 -pthread -o mtwalk mtwalk.c         # ./mtwalk /data <threads>
+gcc -O2 -o bulkstat_probe bulkstat_probe.c  # XFS_IOC_BULKSTAT permission check
+gcc -O2 -o fsmap_scan fsmap_scan.c          # XFS_IOC_GETFSMAP per-inode block totals
+gcc -O2 -o fsmap_dump fsmap_dump.c          # raw GETFSMAP records, for the redaction check
+```
+
+The reflink check in section 6 needs no root and no probe:
+
+```sh
+find /data/home/angch -xdev -type f -size +50M | head -200 |
+  while read -r f; do filefrag -v "$f"; done |
+  gawk 'match($0, /blocks of ([0-9]+) bytes/, m) { bs=m[1]+0; next }
+        match($0, /^[ \t]*[0-9]+:[ \t]*[0-9]+\.\.[ \t]*[0-9]+:[ \t]*[0-9]+\.\.[ \t]*[0-9]+:[ \t]*([0-9]+):/, m) {
+          tot += m[1]; if ($0 ~ /shared/) sh += m[1] }
+        END { printf "shared %.2f GiB of %.2f GiB\n", sh*bs/2^30, tot*bs/2^30 }'
+```
+
+`statbench` and `mtwalk` are Linux-only and are not part of the build; they exist so the numbers
+above can be re-derived rather than believed.
+
+## The native Linux walker, and reflink accounting (2026-09-22)
+
+Acting on the two findings above: `dua-core` is no longer used on Linux, and copy-on-write shared
+extents are now counted once. Same machine, same volume, same `--benchmark` harness as the section
+above.
+
+### Results
+
+Whole of `/data`, 4.23M entries, warm, at each walker's own best thread count:
+
+| | before | after | |
+| --- | --- | --- | --- |
+| `walk` (traversal alone) | 2.32s | **0.49s** | 4.7x |
+| `pipeline` (what the app waits for), default settings | 2.93s | **0.72s** | 4.1x |
+| `pipeline`, best thread count either way | 2.26s | 0.69s | 3.3x |
+| quitting mid-scan | — | **1.3ms** | against a 420ms full scan |
+| reported total | 807.2 GiB | **785.3 GiB** | 21.9 GiB was counted twice |
+
+The entry count, unreadable count and hard-linked count are identical between the two walkers on
+every run, and `--max-depth` agrees exactly at every depth (the one-entry difference is `dua-core`
+reporting the scan root itself, which the model ignores either way).
+
+A caution when reading `--bench-stage all` now: every stage uses `thread_count()`, so the `dua-*`
+stages run at the new default of 24 workers, which is far past where `dua-core` collapses. They
+report 7s rather than the 2.3s they manage at six. **Compare `dua-walk --threads 6` against the
+native walker, not the two lines of one `all` run.**
+
+### What the walker does
+
+`libdiskonaut/src/scan/linux.rs`. `getdents64` for names, `statx` for sizes, which is the same pair
+of syscalls `dua-core` ends up making — section 3 above measured that no portable change to *what*
+is asked per entry is worth anything. The whole difference is the thread model:
+
+- **One shared queue of directories, N workers, and a local stack per worker.** A worker keeps the
+  subdirectories it discovers to itself and publishes half of them only when the shared queue looks
+  thin enough that someone might be about to go idle. Most directories are therefore claimed with
+  no lock at all; the shared lock is taken a few thousand times rather than 385,000.
+- **Batched handoff.** Directories go to the consumer in batches of ~4096 entries rather than one
+  message each, which takes the channel out of the profile.
+- **One `DirEntries` per directory.** The `dua-core` grouping emitted roughly two groups per
+  directory (~670k for ~307k), so every parent was resolved and every hard link de-duplicated about
+  twice. This is most of why the model got faster without being touched.
+- **A stop flag, checked in the worker loop.** Dropping the walk part-way sets it and drains the
+  channel. Both halves are needed, and this is the trap finding #7 above records: draining alone
+  makes every send *succeed*, so the workers cheerfully finish the whole filesystem while the
+  consumer waits to join them. Measured: dropping after 50 directories returns in **1.3ms**, against
+  419ms for the full walk.
+
+For reference, `docs/probes/mtwalk.c` — the throwaway C walker used above to prove the ceiling —
+does the same traversal in 0.387s while allocating no names and emitting nothing. The real walker
+lands at 0.49s while allocating 4.2M `OsString`s, building per-directory `Vec`s and `Arc<Path>`s,
+and shipping it all to another thread. That is about 80% of a walker that does none of the work,
+which is a reasonable place to stop.
+
+### The thread cap moved from 8 to 24
+
+The old cap was a `dua-core` property, not a kernel one. With the native walker the curve is flat
+rather than cliffed, on both filesystems (`pipeline`, three runs each, best of):
+
+| threads | 8 | 12 | 16 | 20 | 24 | 32 |
+| --- | --- | --- | --- | --- | --- | --- |
+| XFS, `/data` | 0.727s | 0.780s | 0.706s | 0.722s | **0.664s** | 0.665s |
+| ext4, `/` `-x` | 0.068s | 0.060s | 0.058s | — | **0.054s** | 0.065s |
+
+`MAX_SCAN_THREADS` is now 24 on Linux and stays 8 elsewhere — the macOS number is a real
+`getattrlistbulk`/APFS contention measurement and does not transfer. Being wrong about this in
+either direction is cheap now: everything from 12 to 32 is within about 10%.
+
+### Reflink accounting
+
+Section 6 above found that `uv`'s package cache reflinks large binaries, that XFS reports the full
+`st_blocks` for every copy, and that `nlink` stays 1 so `HardLinks` could not see it.
+
+The fix reuses the hard-link rule rather than inventing a second one. `EntryMeta` gained
+`shared_extent`, and `HardLinks` gained a second ledger keyed on physical extent instead of inode —
+kept separate because an inode number and a block offset are unrelated numbers that would otherwise
+collide in one map. A file's identity is its first shared extent if it has one, else its inode if
+it is hard-linked, else nothing; extent identity wins because every hard link to a file reports the
+same first extent, so one file still gets one ledger entry.
+
+The result is the same semantics hard links already had: the same blocks count once in any folder
+that reaches them, and once in every folder above. A controlled pair of 200 MiB reflinks:
+
+```
+both together   200.0 MiB      (du -s says 400M)
+a/ alone        200.0 MiB
+b/ alone        200.0 MiB
+```
+
+**Finding it costs an `openat` and a `FS_IOC_FIEMAP` per file**, because there is no bulk answer
+available unprivileged — `GETFSMAP` redacts owners and `BULKSTAT` is refused. Two guards keep that
+affordable:
+
+- **Only on filesystems that can share extents at all**, decided once by `statfs` magic (XFS,
+  btrfs). On ext4 the probe never runs, and the ext4 scan time is unchanged at 0.058s.
+- **Only on regular files of at least 64 KiB of allocated blocks**, which is 3.8% of the files on
+  this volume (144k of 3.8M). Reflinks of small files exist and are missed; they cost the same two
+  syscalls to find and are worth a rounding error.
+
+Measured cost on the full scan: about **0.1s of 0.72s**. What it buys:
+
+| | reported before | after | |
+| --- | --- | --- | --- |
+| `/data` | 807.2 GiB | 785.3 GiB | 10,804 distinct reflinked files |
+| `~/.cache/uv` | 15.1 GiB | 12.0 GiB | 4,784 reflinked; `du -sh` still says 16G |
+
+The identity is the file's **whole extent map**, folded into one number, and only when every
+extent is shared. The first extent alone is not enough, and the first version of this got it
+backwards — see the review finding below.
+
+APFS clones are the same phenomenon and are *not* handled: `getattrlistbulk` does not report
+sharing and macOS has no cheap per-file equivalent of FIEMAP. `scan/bulk.rs` sets `shared_extent: 0`
+and says so.
+
+### Testing
+
+The `dua-core` grouping is still compiled and still tested — it is what platforms other than macOS
+and Linux use — but it is no longer what Linux runs, so the new path needed its own tests
+(`scan::tests::linux_walker`): every entry exactly once at 1, 2 and 8 threads; one group per
+directory; apparent size; `--max-depth`; symlinks not followed; and dropping the walk early without
+hanging.
+
+`scan::tests::reflink::a_reflinked_copy_is_counted_once` is the end-to-end one. It calls `FICLONE`
+directly and **skips itself when the filesystem cannot clone** — which `std::env::temp_dir()`
+usually cannot, since `/tmp` is typically ext4. Point it at a real one to actually run it:
+
+```sh
+DISKONAUT_TEST_REFLINK_DIR=/data cargo test --workspace reflink -- --nocapture
+```
+
+Without that variable it prints `skipped: /tmp cannot reflink` and passes, which is worth knowing
+before trusting a green run — this is the same trap as "type-checking dead code is not testing it"
+in finding #7.
+
+### Filesystem-aware recursion, and the bug it caught
+
+Scanning `/` without `-x` was the check that found the worst defect in the new walker, and it was
+not the one being looked for.
+
+**A persistent `getdents64` error was an infinite loop.** The read loop counted a failed directory
+read and asked again:
+
+```rust
+let Ok(entry) = entry else { failed += 1; continue; };   // wrong
+```
+
+A `getdents64` error is a property of the descriptor, not of one entry, so it is still there on the
+next call. `/proc/<pid>/net` for a process that has since become a zombie returns `EINVAL` *every
+time*, and the walker spun on it forever — one worker pinned at 100% while the other 23 slept on
+the condvar. `dua-core` finished `/proc` in ~1.0s on all five attempts; the new walker hung on all
+five. Found by `strace`, which showed the same call repeating at 65µs intervals:
+
+```
+getdents64(3, 0x7e93093eeb90, 65536) = -1 EINVAL (Invalid argument)   × forever
+```
+
+It now `break`s, which is what `std`'s `ReadDir` does. Worth recording as the general lesson:
+**`continue` on an error is only safe when the error belongs to the item, not to the iterator.**
+
+**Pseudo-filesystems are no longer crossed into.** `/proc` and `/sys` are kernel interfaces wearing
+a directory shape: walking them costs about a million `statx` calls to total zero bytes, `/proc`
+grows a subtree per process and per thread while the scan runs, and — as above — parts of it fail
+permanently when the process they describe dies mid-walk. This was listed under "Correctness
+requirements on Linux" above and had never been done.
+
+The check is by `statfs` magic (`filesystem::is_pseudo`), and is deliberately narrow in two ways:
+
+- **Only at mount points.** A directory whose `st_dev` differs from its parent's is a mount; the
+  device is already in the `statx` the walk makes anyway, so the `statfs` costs one call per mount
+  crossed rather than one per directory.
+- **Never to the scan root.** `diskonaut /proc` still walks `/proc`, because that was asked for.
+  The skip only applies to wandering into one part-way through a scan of something else.
+
+`tmpfs` is deliberately *not* on the list: `/tmp` and `/dev/shm` hold real files that really occupy
+memory, and `du` counts them. `devtmpfs` reports the same magic, so `/dev` is walked too; it is
+small and bounded, unlike the rest.
+
+Measured:
+
+| | before | after |
+| --- | --- | --- |
+| `diskonaut /proc` | hung, 5 runs of 5 | **0.24s**, 894k entries, ~6,840 unreadable |
+| `--bench-stage pipeline /` (no `-x`) | did not finish in 600s | **1.98s**, 9.6M entries |
+
+Scanning `/proc` by name is now about four times faster than `dua-core` managed, which is a side
+effect of the thread model rather than the point.
+
+### This change made a pre-existing wrong number reachable
+
+Read this as a caveat on the work above, not as a footnote. `/` completing in two seconds makes it
+something a user might actually do, and it reports **1.8 TiB on a machine holding about 1 TiB**.
+Before this change a scan of `/` never finished, so nobody ever saw the wrong number. Making a
+broken path fast enough to reach is a real cost of the speed work, even though the bug underneath
+is older than it. The cause is visible in `df`: `/dev/bcache0` is mounted at both
+`/data` and `/home`, so a walk of `/` traverses that filesystem twice and counts every file on it
+twice — 9.6M entries against 4.2M inodes.
+
+This is the Linux form of the macOS firmlink problem in finding #2, and it is listed under
+"Correctness requirements on Linux" above as the bind-mount case. It is pre-existing — `dua-core`
+double-counted identically, on the runs that finished — and it is not fixed here.
+
+The narrow fix available without new machinery would be to refuse a mount leading to a device the
+walk has already entered by another path, which is the rule the macOS walker uses. It was
+considered and rejected: with work-stealing workers, *which* of `/data` and `/home` wins the race
+would vary between runs, so the treemap would move around at random. Doing it properly means
+reading `/proc/self/mountinfo` once at the start and picking a canonical path per device, which
+also covers the same-`st_dev` bind-mount case the device check cannot see at all. That is the way
+in, and it is a separate piece of work.
+
+Until then, **`-x` is the flag that gives a trustworthy whole-machine number.**
+
+### What the audit of this pass caught
+
+Reviewed after the fact, as the macOS work was (finding #7). Two defects, both in the new walker,
+both invisible to the benchmark that motivated it.
+
+**Empty directories never flushed the outbox.** Workers batch directories to the consumer until
+4096 *entries* have accumulated. A directory with no entries added nothing, so a worker walking a
+wide tree of empty directories would hold every one of them until it ran out of work entirely,
+while the consumer sat idle waiting for a batch that could not fill. It never deadlocked — the
+final flush always happens — but it converts the pipeline back into two serial phases and holds the
+whole run's results in memory, in exactly the tree shape where that is worst. Counting
+`entries.len().max(1)` fixes it, which is the convention the app's own batching already used.
+
+**A signal mid-`getdents64` looked like a dead directory.** The `EINVAL` fix above breaks out of a
+directory on any readdir error, which is right for errors that describe the descriptor — but
+`EINTR` describes neither the descriptor nor the entry. It matters here rather than in theory: the
+TUI handles `SIGWINCH`, so **resizing the terminal during a scan** could have silently truncated
+whichever directory a worker happened to be reading, along with its entire subtree, and reported it
+as one unreadable entry. `EINTR` is now retried and everything else still breaks.
+
+Neither would have shown up in the numbers. The first makes the benchmark look *better* on a tree
+of empty directories (no channel traffic), and the second needs a signal that no headless run
+sends.
+
+### The reflink fix crashed the renderer, and the bug was older than it
+
+Reported from real use, a few minutes after the work above was declared done:
+
+```
+panicked at ratatui-core-0.1.2/src/buffer/buffer.rs:251:
+index outside of buffer: the area is Rect { x: 0, y: 0, width: 170, height: 48 }
+but index is (134, 80)
+  4: diskonaut::ui::grid::draw_next_symbol::draw_next_symbol
+  5: diskonaut::ui::grid::draw_rect::draw_rect_on_grid
+```
+
+Row 80 of a 48-row buffer: not an off-by-one, a tile laid out far outside the board.
+
+The cause is the "sizes are not additive" property this document has described from the start,
+finally meeting code that assumed otherwise. `files_in_folder` computed each entry's share as
+`entry.size / folder.size`, which is only ≤ 1 when the entries add up to the folder. Shared blocks
+mean they do not: four reflinked copies of one 1 MB file sit in a folder holding 1 MB, and the
+shares come out at **4.0**. The squarify layout then places tiles well off the screen, and the UI
+indexes the terminal buffer directly, so it panicked instead of drawing wrong.
+
+Hard links could always have done this, and the gotcha above says so in as many words. What
+changed is the odds: the reflink work added 10,804 newly-deduplicated files on this volume, and
+`~/.cache/uv` went from "entries sum to the folder" to 15.1 GiB of entries in a 12.0 GiB folder.
+A latent bug became a crash anyone scanning a `uv` cache would hit.
+
+Two changes, because the second would have made the first a cosmetic glitch:
+
+1. **`files_in_folder` divides by the larger of the folder and the sum of its entries.** A tile is
+   a share of the space its siblings take between them, which fills the board exactly and is the
+   only reading that stays self-consistent once blocks are shared.
+2. **`RectangleGrid::render` skips a tile that does not fit the buffer.** The layout is float
+   arithmetic over sizes that need not add up; "this tile does not fit" is a thing that can happen,
+   not an invariant worth crashing over.
+
+`tiles::tests::entries_larger_than_the_folder_holding_them_stay_on_the_board` builds the
+four-copies-in-a-one-copy-folder case, asserts the shares stay within 1.0, and asserts every tile
+lands on the board. It fails on the old code with `percentages must not exceed the board, got 4`.
+
+The lesson is the one finding #5 already records, from the other direction: **a number that moves
+toward the truth is not the whole story.** The reflink work produced a total that agreed with the
+filesystem, and every test and benchmark passed, because nothing downstream of the total was being
+checked. Hunting the crash by resizing the terminal and fuzzing the layout found nothing; writing
+down the invariant the fix had quietly broken found it in one test.
+
+### What the review caught, including a claim that was simply false
+
+Reviewed after the commits were written. Five findings, all real; two are worth repeating.
+
+**Keying on the first extent could halve a total, not overstate it.** The code above documented
+itself as erring high: "a file that shares only part of itself keeps being counted in full". That
+was wrong, and the ledger's size guard does not save it, because it only fires when the two sizes
+*differ*. Two equal-sized files sharing nothing but their opening extent were merged, and one of
+them counted as nothing:
+
+```sh
+cp --reflink=always a/img.bin b/img.bin        # 1 MiB each
+dd if=/dev/urandom of=b/img.bin bs=1k seek=100 count=100 conv=notrunc
+```
+
+`filefrag` shows `b` with three extents — shared, *not* shared, shared — and diskonaut reported
+**1.0 MiB for 2.0 MiB of files.** The identity is now the whole extent map (up to 64 extents,
+FNV-folded), accepted only when every extent is shared and the `LAST` flag proves the map is
+complete. Anything else is counted in full, which is what the comment always claimed.
+
+The lesson is the one this file keeps relearning: the guard that was supposed to make this safe
+(`seen.size != size`) was written for hard links, where two different files cannot share an inode
+number *and* a size. Reused for extents, the same line stopped meaning what it said.
+
+**`statx` is not `lstat`, and the difference automounts a network.** The walk asked for
+`AT_SYMLINK_NOFOLLOW` and nothing else. `stat`, `lstat` and `fstatat` all behave as though
+`AT_NO_AUTOMOUNT` were set; **bare `statx` does not**, and `man 2 statx` names this exact case —
+"can be used in tools that scan directories to prevent mass-automounting of a directory of
+automount points". The walker it replaced went through `std`'s `lstat` and was implicitly safe.
+
+So merely *looking at* an autofs placeholder mounted it. A directory of NFS home maps would have
+been mounted wholesale and one dead server would have hung the scan — and this fires at stat time,
+before the descent decision, so the care taken over autofs in `filesystem` did not cover it at all.
+That reasoning is only sound now the flag is set.
+
+The other three, more briefly:
+
+- **The thread cap was per-platform when it wanted to be per-walker.** `thread_count()` also feeds
+  `scan_folder` (public) and the `dua-*` benchmark stages, so raising Linux to 24 ran the one
+  walker that collapses past eight at 24 of them — 38% slower, and it quietly re-tuned the very
+  baseline this document compares against. There are now two caps.
+- **`i128::from(f_type)` sign-extends on 32-bit.** `__fsword_t` is signed and 32 bits wide on i686
+  and armv7, so every magic with the top bit set — btrfs, selinuxfs, bpf, hugetlbfs — would never
+  have matched there, silently turning the whole reflink feature off. Truncating to `u32` is
+  lossless and correct on both.
+- **`Drop` set the stop flag outside the lock**, which is exactly what `retire` takes the lock to
+  avoid. It was rescued by the retire-to-zero path, but only by a multi-step argument; it now holds
+  the lock, and the argument is not needed.
+
+### Known gaps in this pass
+
+- **`tree-only` is distorted, not merely noisy, and should be read as an upper bound.** It ranges
+  from 0.37s to 0.87s across runs, and in one run reported 0.871s while `tree` — which contains it —
+  reported 0.727s. A stage cannot cost more than the stage that contains it, so this is systematic:
+  the untimed `collect()` of 4.2M `DirEntries` leaves the allocator and page cache in a state the
+  real pipeline never sees, and the timed build then runs in it. The conclusion it was used for
+  still holds (walk 0.49s, pipeline 0.72s), but the number itself should not be quoted as the
+  model's cost without that caveat.
+- **`dua-core` is still a dependency.** It backs the `dua-*` benchmark stages, which are how the
+  comparison above is reproduced, and `fallback::group_by_directory` for platforms that are neither
+  macOS nor Linux. Dropping it would mean giving up the baseline.
+- **The reflink threshold is a guess, not a measurement.** 64 KiB was chosen because it leaves 3.8%
+  of files to probe on this volume. Nobody has measured how many shared bytes live below it.
+- **A scan of `/` double-counts filesystems mounted in two places**, as above. `-x` avoids it.
+- **The macOS build is unverified.** `scan/bulk.rs` needed one field adding to two `EntryMeta`
+  literals and nothing here can compile it — the module is `cfg`'d out on Linux, which is exactly
+  the trap finding #7 records. It needs a build on a Mac before release.
+- **`cargo deny check` was not run**; `cargo-deny` is not installed here. `Cargo.lock` is unchanged,
+  but rustix's feature set is (`std` and `fs` added), so the licence and advisory gates are unproven.
 
 ## Known gaps
 

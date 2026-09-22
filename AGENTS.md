@@ -43,7 +43,7 @@ Five concurrent threads communicate via bounded `mpsc` channels:
 | Thread | Role |
 |--------|------|
 | `stdin_handler` | Reads crossterm events → `Instruction::Keypress` |
-| `hd_scanner` | parallel walk → `Instruction::AddScannedDirectories` (batched, ~4096 entries) |
+| `hd_scanner` | parallel walk (its own worker pool) → `Instruction::AddScannedDirectories` (batched, ~4096 entries) |
 | `event_executer` | Converts `Event` → `Instruction` (visual feedback) |
 | `loading_loop` | Toggles loading indicator while scanning |
 | **main** | App state mutations + ratatui rendering |
@@ -56,7 +56,10 @@ Five concurrent threads communicate via bounded `mpsc` channels:
 - `model/files/file_tree.rs` — `FileTree`: hierarchical navigation, deletion tracking
 - `scan/mod.rs` — `scan_directories()`: per-directory batches, the seam every walker plugs into
 - `scan/bulk.rs` — macOS walker on `getattrlistbulk(2)` (see `docs/scan-performance.md`)
-- `model/files/hard_links.rs` — charges a hard-linked file to each folder once, over interned directory ids
+- `scan/linux.rs` — Linux walker on `getdents64`/`statx`, own thread pool; also the `FS_IOC_FIEMAP`
+  reflink probe. `dua-core` is only the fallback for other platforms and the benchmark baseline
+- `model/files/hard_links.rs` — charges shared blocks to each folder once, over interned directory
+  ids; two ledgers, one keyed on inode (hard links) and one on physical extent (reflinks)
 - `model/files/hash.rs` — the fast hasher behind the folder and inode maps
 - `tiles/treemap.rs` — squarify algorithm (`HEIGHT_WIDTH_RATIO = 2.5`)
 - `tiles/board.rs` — `Board`: tile selection, zoom stack, navigation
@@ -89,15 +92,19 @@ Exiting { app_loaded: bool }
 
 - **Render-on-demand**: Render only when an `Instruction` arrives; no continuous loop.
 - **Live treemap update**: `Board` recomputes tiles as scanned directories arrive.
-- **Sizes are not additive**: a folder's size counts each distinct file once, so hard links make it
-  smaller than the sum of its entries. See `docs/scan-performance.md`.
+- **Sizes are not additive**: a folder's size counts each distinct *set of blocks* once, so hard
+  links and XFS/btrfs reflinks both make it smaller than the sum of its entries. See
+  `docs/scan-performance.md`.
 - **Zoom as filter**: Zoom level controls which nested folders are rendered.
 - **Modal via enum**: `UiMode` variant change = modal open/close; no separate stack.
 - **Config merging**: CLI `--apparent-size` ORs with config file setting.
-- **Graceful degradation**: Read errors counted but scan continues.
+- **Graceful degradation**: Read errors counted but scan continues. A failed *directory read* ends
+  that directory rather than retrying it — the error belongs to the descriptor, not the entry.
 - **Per-filesystem attributes**: a returned-attributes bitmap says an attribute is *present*, not
   that its value is real. `msdosfs` claims `ATTR_FILE_ALLOCSIZE` and packs zero, so the size
   attribute is chosen per device. See `docs/scan-performance.md`.
+- **Pseudo-filesystems**: crossing a mount point into `/proc`, `/sys`, cgroup, debugfs and friends
+  is refused (by `statfs` magic); naming one as the scan root still scans it.
 - **ManuallyDrop on FileTree**: Avoids slow recursive drop on exit.
 
 ---
