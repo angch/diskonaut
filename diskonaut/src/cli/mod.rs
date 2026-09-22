@@ -28,11 +28,12 @@ pub struct Opt {
     /// Repeat each benchmark stage this many times
     #[arg(long, value_name = "N", default_value_t = 1)]
     pub bench_repeat: u32,
-    /// Tree-building threads for the `sharded` benchmark stage
-    #[arg(long, value_name = "N", default_value_t = 4)]
+    /// Tree-building threads for the `sharded` benchmark stage (default: what the app uses)
+    #[arg(long, value_name = "N", default_value_t = libdiskonaut::scan::parallel::SHARDS)]
     pub bench_shards: usize,
-    /// Shard directories by their first N path components (0 = the whole path)
-    #[arg(long, value_name = "N", default_value_t = 0)]
+    /// Shard directories by their first N path components, 0 for the whole path (default: what
+    /// the app uses)
+    #[arg(long, value_name = "N", default_value_t = libdiskonaut::scan::parallel::SHARD_DEPTH)]
     pub bench_shard_depth: usize,
     /// Stop descending below this depth (partial scans; the root is depth 0)
     #[arg(long, value_name = "N")]

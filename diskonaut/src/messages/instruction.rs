@@ -8,7 +8,7 @@ use crate::input::{
     handle_keypress_loading_mode, handle_keypress_normal_mode, handle_keypress_screen_too_small,
     handle_keypress_warning_message,
 };
-use libdiskonaut::DirEntries;
+use libdiskonaut::{DirSummary, FileTree};
 
 use crate::{App, UiMode};
 
@@ -17,7 +17,10 @@ pub enum Instruction {
     ResetCurrentPathColor,
     FlashSpaceFreed,
     UnflashSpaceFreed,
-    AddScannedDirectories(Vec<DirEntries>),
+    /// Outlines of scanned directories, for the live view while the tree is built elsewhere.
+    AddScannedSummaries(Vec<DirSummary>),
+    /// The finished tree, which replaces the live view's outline.
+    ScanComplete(Box<FileTree>),
     StartUi,
     ToggleScanningVisualIndicator,
     RenderAndUpdateBoard,
@@ -47,8 +50,11 @@ where
             Instruction::UnflashSpaceFreed => {
                 app.unflash_space_freed();
             }
-            Instruction::AddScannedDirectories(directories) => {
-                app.add_scanned_directories(directories);
+            Instruction::AddScannedSummaries(summaries) => {
+                app.add_scanned_summaries(summaries);
+            }
+            Instruction::ScanComplete(tree) => {
+                app.finish_scan(*tree);
             }
             Instruction::StartUi => {
                 app.start_ui();

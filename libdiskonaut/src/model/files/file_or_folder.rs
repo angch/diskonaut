@@ -72,13 +72,7 @@ impl Folder {
             folder.size += size;
             folder.num_descendants += 1;
             if components.peek().is_some() {
-                folder
-                    .contents
-                    .insert_if_absent(name, || FileOrFolder::Folder(Box::default()));
-                folder = match folder.contents.get_mut(name) {
-                    Some(FileOrFolder::Folder(folder)) => folder,
-                    _ => unreachable!("got a file in the middle of a path"),
-                };
+                folder = folder.contents.folder_or_insert(name);
             } else if meta.is_dir {
                 // A directory can already exist here if one of its children was reported first.
                 folder
@@ -97,27 +91,26 @@ impl Folder {
     /// `size_at_depth[k]` is added to the folder `k` levels down, so that a hard-linked file can
     /// be charged to some ancestors and not others. For a tree without hard links every element
     /// is the same total. See [`crate::model::HardLinks`].
+    ///
+    /// `extra_descendants` are counted along the path as well as the entries themselves: the live
+    /// outline places a directory's subfolders but not its files, and still wants the files in
+    /// every ancestor's count.
     pub fn add_dir_entries<'a>(
         &mut self,
         dir_path: impl Iterator<Item = &'a OsStr>,
         names: Vec<u8>,
         entries: Vec<NamedEntry>,
         size_at_depth: &[u128],
+        extra_descendants: u64,
     ) {
-        let contained_count = entries.len() as u64;
+        let contained_count = entries.len() as u64 + extra_descendants;
         let size_at = |depth: usize| size_at_depth.get(depth).copied().unwrap_or(0);
 
         let mut folder = self;
         folder.size += size_at(0);
         folder.num_descendants += contained_count;
         for (depth, name) in dir_path.enumerate() {
-            folder
-                .contents
-                .insert_if_absent(name, || FileOrFolder::Folder(Box::default()));
-            folder = match folder.contents.get_mut(name) {
-                Some(FileOrFolder::Folder(next)) => next,
-                _ => unreachable!("got a file in the middle of a path"),
-            };
+            folder = folder.contents.folder_or_insert(name);
             folder.size += size_at(depth + 1);
             folder.num_descendants += contained_count;
         }

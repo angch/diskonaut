@@ -4,7 +4,7 @@ use ::std::path::{Component, Path, PathBuf};
 use crate::model::{FileOrFolder, FileToDelete, Folder, HardLinks};
 use ::std::sync::Arc;
 
-use crate::scan::{DirEntries, EntryMeta, NamedEntry, SharedBlocks};
+use crate::scan::{DirEntries, DirSummary, EntryMeta, NamedEntry, SharedBlocks};
 
 /// Shared-block sightings a tree has put off charging: one entry per directory that held any,
 /// with the directory's path relative to the scan root.
@@ -139,6 +139,48 @@ impl FileTree {
     pub fn reflinked_files(&self) -> usize {
         self.hard_links.tracked_reflinks()
     }
+    /// Add a directory's outline — its subfolders and its files' total — without its files.
+    ///
+    /// This is the live view while the real tree is built on other threads: cheap enough to run
+    /// on the rendering thread for every directory as it is scanned, and enough to show every
+    /// folder with a running size. Files appear when the finished tree takes this one's place.
+    /// Shared blocks are counted in full here, so sizes can run a little high until then.
+    pub fn add_summary(&mut self, summary: DirSummary) {
+        let DirSummary {
+            dirs,
+            files_size,
+            entries,
+        } = summary;
+        let (dir_path, names, dir_entries) = dirs.into_parts();
+        let Ok(relative) = dir_path.strip_prefix(&self.path_in_filesystem) else {
+            return;
+        };
+        let depth = relative.components().count();
+        let file_count = entries.saturating_sub(dir_entries.len() as u64);
+        self.size_at_depth.clear();
+        self.size_at_depth.resize(depth + 1, u128::from(files_size));
+        self.base_folder.add_dir_entries(
+            relative.components().map(Component::as_os_str),
+            names,
+            dir_entries,
+            &self.size_at_depth,
+            file_count,
+        );
+    }
+
+    /// Carry over where `other` had navigated to, if that folder exists here; back to the root
+    /// if it does not.
+    pub fn adopt_navigation_from(&mut self, other: &FileTree) {
+        let names = other.current_folder_names.clone();
+        let exists = names.is_empty()
+            || matches!(
+                self.base_folder.path(names.clone()),
+                Some(FileOrFolder::Folder(_))
+            );
+        self.current_folder_names = if exists { names } else { Vec::new() };
+        self.space_freed = other.space_freed;
+    }
+
     /// Add every entry of one directory at once.
     ///
     /// Resolving `dir_path` is O(depth), and doing it once for the whole directory rather than
@@ -230,6 +272,7 @@ impl FileTree {
             names,
             entries,
             size_at_depth,
+            0,
         );
     }
 }

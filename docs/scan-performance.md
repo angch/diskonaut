@@ -1868,8 +1868,208 @@ handed across threads, in a tree the main thread is also rendering from live. Th
 risk class from everything above — not a wrong number, a potential data race — and it is the
 reason it is written down here rather than built.
 
+> **Superseded, the same day.** It was built — but not this way. The design that shipped shares no
+> memory at all: each thread owns a private tree, the live view is an outline the rendering thread
+> builds for itself, and the trees are merged once at the end. See the next section.
+
+
+## The tree build goes parallel — private trees, a live outline, one merge (2026-09-22)
+
+The proposal, from outside the work: *let the live renderer do extra work while parallel workers
+fill up their own folders, then a final dedup after it is done.* That is a better design than the
+one the previous section declined, because it removes the reason for declining it. Workers that
+own private trees share nothing, so there is nothing to race on; the "final dedup" is where
+shared-block accounting goes; and the renderer builds itself a cheap outline to show meanwhile.
+
+### Result
+
+`/data`, 4.23M entries, the app's path (`--bench-stage sharded`) against the single-threaded build
+it replaces (`pipeline`), interleaved:
+
+| | `pipeline` | `sharded` |
+| --- | --- | --- |
+| scan, as the app waits for it | 0.646–0.677s | **0.432–0.467s** |
+| of which walk + build | — | 0.417s |
+| of which merge | — | **0.002s** |
+| of which replay (the dedup) | — | 0.013s |
+| peak RSS, benchmark | 594 MB | **558 MB** |
+
+About **30% faster**, and it lands exactly on the walk floor: `walk+build` is the walk alone. Peak
+memory went *down*, because a directory's name buffer is moved into whichever shard's tree owns it
+rather than copied, and four smaller trees fragment the allocator less than one large one.
+
+That is the build path in isolation. **As the app shows it — from launch to the `Total:` line under
+`tmux`, five runs each — the previous app took 0.66–0.68s and this one takes 0.46–0.47s: the same
+30%.** It did not start out that way. The live view cost the app a third of that gain at first, and
+the section on it below is the record of two wrong turns on the way from 0.55s to 0.47s.
+
+Totals are identical to the single-threaded build to the entry, the hard link and the reflink.
+
+### Why it is correct
+
+Everything rests on one property this document has relied on since the hard-link work:
+**`HardLinks::charge` is order-independent.** A deferred tree counts every shared entry in full
+and notes `(blocks, size, directory)`; the replay charges each note through one ledger and, where
+the ledger says depths `0..=d` had already counted these blocks through another path, subtracts
+the size from exactly those folders. Inline charging adds to depths `d+1..`; deferred-then-replay
+adds to all and takes back `0..=d`. Same folders, same numbers — in *whatever order* the shards
+happen to replay.
+
+Tested three ways, because the property is load-bearing:
+
+- `model::tests::sharded::sharded_build_matches_inline_build_folder_by_folder`: a random tree
+  thick with hard links and reflinks, built inline and built as 1, 2, 3, 4 and 8 shards, merged
+  and replayed; **every folder's size and descendant count compared**, over five seeds.
+- `a_stub_parent_merges_into_the_real_one`: the placeholder case — a child's group arrives in one
+  shard before its parent's arrives in another.
+- `scan::tests::parallel_build_matches_the_single_threaded_tree`: the real walker on a real
+  fixture, against `scan_into_tree`.
+
+### The first version was slower than what it replaced
+
+Worth its own heading, because the fix is the transferable part.
+
+Sharding by a hash of the **whole** directory path balances perfectly and gave 0.701s — worse than
+0.646s — with the merge at **0.242s** and scaling linearly with shard count (0.107s at 2, 0.405s at
+8). The build phase was already at the walk floor; the merge ate the entire gain.
+
+The reason: with whole-path hashing, every ancestor of every directory exists as a stub in every
+shard that holds anything beneath it. A simulation over the real directory listing counted
+**74,688 folders needing reconciliation at K=4**, across 274,496 shard-visits — and each visit is a
+cold-cache pointer chase on one core, after the walk, into memory that four other cores wrote.
+
+Sharding by the first **D components** of the path confines overlap to folders shallower than D;
+everything deeper moves into the merged tree as a whole subtree, in O(1). The same simulation,
+choosing D:
+
+| D | prefixes | largest prefix | folders to reconcile | busiest shard, K=4 | K=8 |
+| --- | --- | --- | --- | --- | --- |
+| 3 | 64 | 61.7% | 3 | 73.6% | 65.2% |
+| 4 | 355 | 13.3% | 64 | 39.0% | 26.0% |
+| **5** | 2,479 | 10.8% | **355** | **29.5%** | **18.1%** |
+| 6 | 11,146 | 10.7% | 2,479 | 33.9% | 28.0% |
+
+D=3 is nearly free to merge and useless to parallelise: `home/angch/project` alone is 62% of the
+volume, and a prefix is indivisible. D=6 gets *unluckier* than D=5 because the ~10% subtrees are
+still indivisible and now hash into fewer, larger lumps. D=5 is the knee, and the bench agreed:
+
+| | walk+build | merge | total |
+| --- | --- | --- | --- |
+| whole path, K=4 | 0.444s | 0.242s | 0.701s |
+| D=5, K=4 | 0.423s | **0.002s** | **0.437s** |
+| D=5, K=8 | 0.450s | 0.002s | 0.467s |
+
+The whole D∈{4,5,6} × K∈{4,6,8} grid lands within 0.437–0.480s, so the choice is not fragile.
+`parallel::SHARDS = 4` and `SHARD_DEPTH = 5` are the constants, with this table as their reason.
+
+### The live view
+
+Loading mode allows full navigation — move, zoom, enter, go up — so the view during the scan
+cannot be a stub at some depth without sending people into empty folders. Instead the dispatching
+thread, which sees every directory anyway, sends the renderer a **`DirSummary`**: the directory's
+subfolder entries and what its files add up to. The renderer applies it with
+`FileTree::add_summary`, which walks the full path adding size and count at every level and places
+only the subfolder entries.
+
+**The first version of that cost 0.52–0.55s on the rendering thread — the whole scan.** The
+estimate had been ~0.13s, from the "resolve-parent" phase measured in the single-threaded build,
+and it was wrong by four times. Instrumented under `tmux`:
+
+```
+dispatcher: built=0.521-0.545s  (0.417s in the benchmark)  blocked-on-main=0.207-0.238s
+main:       385,519 summaries applied in 0.520-0.554s;  6 loading renders in 0.001s
+```
+
+The rendering thread was saturated applying the outline, so the bounded instruction channel
+filled, the dispatcher spent ~0.22s blocked sending into it, and — because the dispatcher is the
+walk's single consumer — the walk itself ran 0.1s slower than in the benchmark. App: 0.55–0.62s.
+Rendering, for the record, was free.
+
+**Wrong turn one: make each summary cheaper.** The path walk did an `insert_if_absent` and then a
+`get_mut` at every level — two scans of the same folder — and then walked the path again to add
+the file count. `Contents::folder_or_insert` does the find-or-create in one scan and the count
+rides along. Worth having: the four real builders resolve parents through the same call, and the
+single-threaded `pipeline` benchmark fell from 0.646–0.677s to 0.616–0.619s. But measured again,
+the outline had only gone from 0.53s to **0.47s — still the whole scan**, dispatcher still blocked
+0.15–0.17s, app 0.52–0.55s. A 12% cut in a cost that needed to fall ten times.
+
+**Wrong turn two: index the wide folders.** Every path walks through `home/angch` (61 entries) and
+`project` (39), scanned linearly below `INDEX_ABOVE = 128`; indexing them looked like the answer.
+Lowering the threshold made everything *worse* — 16: 0.671s, 32: 0.637s, 64: 0.622s against
+0.617s at 128 — and the constant went back. That is the **fourth** time this session a lookup
+structure has lost to a linear scan over the same data, now including a 61-entry folder on the
+hottest path there is. The rule stands without exceptions so far.
+
+**What worked: do less, not the same thing faster.** The view can only show folders near the top
+of the tree, yet the outline was O(directories). `Outline` now stops at `DEFAULT_DEPTH = 6`:
+directories above it go through as they are, and everything deeper is rolled up — bytes, entry
+count, read failures — into the *frontier* folder just below the cap that contains it. Every
+folder the view can show keeps exact running totals; what lies beneath the frontier is unknown
+until the finished tree arrives. `model::tests::outline::a_capped_outline_keeps_the_totals_it_shows`
+asserts the roll-up conserves size and count folder by folder above the frontier.
+
+```
+dispatcher: built=0.465-0.474s  blocked-on-main=0.008-0.011s
+main:       ~44,000 summaries applied in 0.039-0.047s
+```
+
+385k summaries became 44k, the rendering thread went from saturated to ~9% busy, the back-pressure
+vanished, and the walk runs at benchmark speed inside the app. **App: 0.46–0.47s.**
+
+On completion the finished tree is swapped in (`App::finish_scan`) and the user stays where they
+were: `adopt_navigation_from` carries the current folder over, which is always valid because
+every outline folder came from a real directory group. The outline is leaked, deliberately, the way
+the main tree already was.
+
+Observed under `tmux` on `/data`:
+
+```
+t=0.20s   Scanning: 662.9G (623867 files)     home/ (+623865 descendants)   630.9G (95%)
+t=3.3s    Total: 785.4G (4232570 files), freed: 0 (failed to read 12 files) | /data
+```
+
+Bytes lead entries in the live counter — 85% of the bytes at 15% of the entries — because a
+handful of 90 GB files dominate this volume and the directory-parallel walk reaches them early.
+That is the filesystem, not a bug. Quitting mid-scan takes 0.32s by the same crude `tmux` clock
+that gave the previous app 0.51s.
+
+### What it costs
+
+Like for like, the running app on `/data`, `/usr/bin/time` under `tmux`:
+
+| | previous app | this app |
+| --- | --- | --- |
+| launch to `Total:` | 0.66–0.68s | **0.46–0.47s** |
+| peak RSS | 603 MB | **581 MB** |
+
+Speed was the stated priority, and it turned out not to cost memory after all: the build path
+alone peaks at 558 MB, the capped outline adds about 23 MB on top, and the result is still below
+the previous app. The uncapped outline had cost 662 MB — the depth cap is where the other 80 MB
+went.
+
+Four consequences to know about rather than fix:
+
+- **Below the frontier — seven levels down — folders are empty until the scan completes.** Enter
+  one mid-scan and it says so. Their sizes are correct in the folder above; their contents arrive
+  with the finished tree. On a half-second scan nobody notices; on a minutes-long cold scan of a
+  slow disk it is the trade that bought the speed.
+- **The live total overshoots and then drops.** The outline counts shared blocks in full; the
+  finished tree charges them once. On this volume the live figure passes 814 GB on its way to a
+  final 785.4 GB, and the correction lands at the swap. Same cause, same swap.
+- **"(N files)" during the scan counts what has been outlined so far**, and the treemap of a
+  folder that holds only files is blank until completion. Both are honest — the scan is not done —
+  but they look different from the previous app, which showed files as they arrived.
+- **A builder panic takes the scan down.** `build_tree` joins its builders and propagates a panic;
+  nothing in a builder should panic, and a `FileTree` that panics on one thread would have
+  panicked on the rendering thread before, so this is not a regression — but the failure now
+  surfaces from `hd_scanner` rather than `main`.
+
 
 ## Known gaps
+
+> The two Linux sections above that end "the model is the bottleneck" are superseded: the model is
+> built on four threads and hidden behind the walk. On Linux the scan is now bound by the walk,
+> which is bound by one `statx` per entry in the kernel.
 
 - The reported total for `/` is ~706 GiB against 884 GiB used. The difference is APFS snapshots,
   purgeable space, and the deliberately skipped auxiliary volumes. Whether that is the right

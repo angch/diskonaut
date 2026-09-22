@@ -20,8 +20,8 @@
 use ::std::ffi::OsStr;
 use ::std::os::unix::ffi::OsStrExt;
 
-use super::FileOrFolder;
 use super::hash::FastMap;
+use super::{FileOrFolder, Folder};
 
 /// Entries above which a folder builds a name index instead of scanning.
 const INDEX_ABOVE: usize = 128;
@@ -164,6 +164,25 @@ impl Contents {
         }
         self.push(name, node);
         None
+    }
+
+    /// The subfolder called `name`, created empty if there is none.
+    ///
+    /// One scan where an `insert_if_absent` followed by a `get_mut` took two. This is the lookup
+    /// on the path walk that resolves every directory's parent — once per level, for every
+    /// directory the scan reports — so it is the hottest thing the model does.
+    pub fn folder_or_insert(&mut self, name: &OsStr) -> &mut Folder {
+        let position = match self.position(name) {
+            Some(position) => position,
+            None => {
+                self.push(name, FileOrFolder::Folder(Box::default()));
+                self.entries.len() - 1
+            }
+        };
+        match &mut self.entries[position].node {
+            FileOrFolder::Folder(folder) => folder,
+            FileOrFolder::File(_) => unreachable!("got a file in the middle of a path"),
+        }
     }
 
     /// Insert only if nothing is there yet.

@@ -7,7 +7,7 @@ use ::std::sync::mpsc::{Receiver, SyncSender};
 use ::std::sync::Arc;
 
 use libdiskonaut::tiles::Board;
-use libdiskonaut::{DirEntries, FileOrFolder, FileToDelete, FileTree, Folder};
+use libdiskonaut::{DirSummary, FileOrFolder, FileToDelete, FileTree, Folder};
 
 use crate::Event;
 use crate::config::Keybinds;
@@ -114,19 +114,27 @@ where
         self.loaded = true;
         self.render_and_update_board();
     }
-    /// Add several scanned directories at once, showing only the last one in the UI.
-    pub fn add_scanned_directories(&mut self, directories: Vec<DirEntries>) {
+    /// Add the outlines of several scanned directories to the live view.
+    pub fn add_scanned_summaries(&mut self, summaries: Vec<DirSummary>) {
         let mut failed = 0;
         let mut last_path = None;
-        for directory in directories {
-            failed += directory.failed;
-            last_path = Some(Arc::clone(&directory.path));
-            self.file_tree.add_dir_entries(directory);
+        for summary in summaries {
+            failed += summary.dirs.failed;
+            last_path = Some(Arc::clone(&summary.dirs.path));
+            self.file_tree.add_summary(summary);
         }
         self.file_tree.failed_to_read += failed;
         if let Some(path) = last_path {
             self.ui_effects.last_read_path = Some(path.to_path_buf());
         }
+    }
+    /// Replace the live view's outline with the finished tree, keeping the user where they are.
+    pub fn finish_scan(&mut self, mut tree: FileTree) {
+        tree.adopt_navigation_from(&self.file_tree);
+        // Dropping a `ManuallyDrop` runs no destructor, so the outline is leaked on purpose — for
+        // the same reason the field is `ManuallyDrop` at all: nobody is waiting for its memory
+        // back, and dropping a tree is a recursive walk of every folder in it.
+        let _outline = std::mem::replace(&mut self.file_tree, ManuallyDrop::new(tree));
     }
     pub fn reset_ui_mode(&mut self) {
         match self.ui_mode {

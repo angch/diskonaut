@@ -4,7 +4,7 @@ use ::std::io::Write;
 use ::std::path::{Path, PathBuf};
 use ::std::sync::mpsc;
 
-use libdiskonaut::{DirEntries, ScanOptions, scan_directories};
+use libdiskonaut::{DirEntries, FileTree, Folder, ScanOptions, scan_into_tree};
 use ratatui::backend::TestBackend;
 
 use super::{App, UiMode};
@@ -34,7 +34,8 @@ fn app_with_scanned_dir(dir: &Path, width: u16, height: u16) -> App<TestBackend>
         show_apparent_size: true,
         ..ScanOptions::default()
     };
-    app.add_scanned_directories(scan_directories(dir, options).collect());
+    let (tree, _) = scan_into_tree(dir, options);
+    app.finish_scan(tree);
     app.start_ui();
     app
 }
@@ -110,7 +111,9 @@ fn prompt_file_deletion_shows_confirmation() {
             ..libdiskonaut::EntryMeta::default()
         },
     );
-    app.add_scanned_directories(vec![scanned]);
+    let mut tree = FileTree::new(Folder::new(&dir), dir.clone());
+    tree.add_dir_entries(scanned);
+    app.finish_scan(tree);
     app.start_ui();
     let file_index = app
         .board

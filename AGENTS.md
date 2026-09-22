@@ -38,23 +38,29 @@ cargo run --bin diskonaut -- -a  # apparent size mode
 
 ### Thread Model
 
-Five concurrent threads communicate via bounded `mpsc` channels:
+Five kinds of thread communicate via bounded `mpsc` channels, plus `parallel::SHARDS` tree
+builders that share nothing:
 
 | Thread | Role |
 |--------|------|
 | `stdin_handler` | Reads crossterm events → `Instruction::Keypress` |
-| `hd_scanner` | parallel walk (its own worker pool) → `Instruction::AddScannedDirectories` (batched, ~4096 entries) |
+| `hd_scanner` | Drives the walk (its own worker pool). Sends each directory to one `tree_builder` by path prefix, and feeds an `Outline` that sends **main** a folder-only view → `Instruction::AddScannedSummaries` (batched, ~4096 entries). Directories deeper than `Outline::DEFAULT_DEPTH` are rolled up into the frontier folder above them rather than sent, so main does O(visible) work, not O(directories). When the walk ends: merges the builders' trees, replays deferred shared blocks → `Instruction::ScanComplete(tree)`, then `StartUi` |
+| `tree_builder_N` | Owns a private `FileTree` in deferred-sharing mode and adds whatever `hd_scanner` sends it. Never touches another thread's memory |
 | `event_executer` | Converts `Event` → `Instruction` (visual feedback) |
 | `loading_loop` | Toggles loading indicator while scanning |
-| **main** | App state mutations + ratatui rendering |
+| **main** | App state mutations + ratatui rendering. During the scan it renders from the *outline*; on `ScanComplete` it swaps in the finished tree, keeping the current folder |
 
 **Synchronization**: `Arc<AtomicBool>` for `running`/`loaded` flags; bounded sync channels (capacity 1–100).
 
 ### Crate Responsibilities
 
 **`libdiskonaut`** — pure logic, no TUI:
-- `model/files/file_tree.rs` — `FileTree`: hierarchical navigation, deletion tracking
-- `scan/mod.rs` — `scan_directories()`: per-directory batches, the seam every walker plugs into
+- `model/files/file_tree.rs` — `FileTree`: hierarchical navigation, deletion tracking;
+  `deferring_shared_blocks` / `merge_from` / `replay_deferred` for the parallel build;
+  `add_summary` for the outline
+- `scan/mod.rs` — `scan_directories()`: per-directory batches, the seam every walker plugs into;
+  `parallel::build_tree()`: the app's tree build — shard by path prefix, merge, replay;
+  `Outline`/`DirSummary`: the depth-capped live view
 - `scan/bulk.rs` — macOS walker on `getattrlistbulk(2)` (see `docs/scan-performance.md`)
 - `scan/linux.rs` — Linux walker on `getdents64`/`statx`, own thread pool; also the `FS_IOC_FIEMAP`
   reflink probe. `dua-core` is only the fallback for other platforms and the benchmark baseline
@@ -91,7 +97,17 @@ Exiting { app_loaded: bool }
 ## Key Patterns
 
 - **Render-on-demand**: Render only when an `Instruction` arrives; no continuous loop.
-- **Live treemap update**: `Board` recomputes tiles as scanned directories arrive.
+- **Live treemap update**: while scanning, `Board` recomputes tiles from a folder-only *outline*
+  (`Outline` → `FileTree::add_summary`) — every folder to `Outline::DEFAULT_DEPTH` with a running
+  size, shared blocks counted in full, deeper directories rolled up into the frontier folder above
+  them. Files, and folders below the frontier, appear when the finished tree replaces the outline
+  (`App::finish_scan`). Keep the outline O(visible): the first version sent every directory and
+  saturated the rendering thread, which back-pressured the dispatcher and slowed the walk.
+- **Parallel build, no shared memory**: each builder owns a tree; correctness rests on
+  `HardLinks::charge` being order-independent, so deferring every charge to one final replay gives
+  the same per-folder sizes as charging inline. Tested folder-by-folder against the inline tree
+  (`model::tests::sharded`). Shard by `SHARD_DEPTH` path components, not the whole path — see
+  `docs/scan-performance.md` for why the merge otherwise costs more than the parallelism saves.
 - **Sizes are not additive**: a folder's size counts each distinct *set of blocks* once, so hard
   links and XFS/btrfs reflinks both make it smaller than the sum of its entries. See
   `docs/scan-performance.md`.
@@ -168,8 +184,11 @@ cargo test -p libdiskonaut --lib -- --ignored fat32
 
 ### Changing the scan
 Read `docs/scan-performance.md` first. It records what was measured, what turned out not to
-matter, and how to reproduce the numbers with `--benchmark`. The short version: the walk dominates
-and the data model is free, so measure the walker before optimising anything else.
+matter, and how to reproduce the numbers with `--benchmark`. The short version: on Linux the walk
+is the floor (~0.40s for 4.2M entries, at the kernel's `statx` cost) and the tree build is hidden
+behind it on `parallel::SHARDS` threads. `--bench-stage sharded` is the app's path; `pipeline` is
+the single-threaded build it replaced. Anything you change must keep `sharded`'s totals identical
+to `pipeline`'s — that comparison is the correctness check, not just the speed one.
 
 ### Modifying treemap layout
 - Core algorithm: `libdiskonaut/src/tiles/treemap.rs`

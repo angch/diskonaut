@@ -768,3 +768,44 @@ mod reflink {
         );
     }
 }
+
+/// The parallel build is what the app uses; it has to agree with the single-threaded tree on a
+/// real directory, not only on synthetic groups.
+#[test]
+fn parallel_build_matches_the_single_threaded_tree() {
+    let (dir, expected) = fixture_tree("parallel_fixture");
+    let options = ScanOptions {
+        show_apparent_size: true,
+        ..ScanOptions::default()
+    };
+    let (single, single_failed) = scan_into_tree(&dir, options);
+    let directories = expected.iter().filter(|path| path.is_dir()).count() + 1;
+
+    let mut seen = 0usize;
+    let (parallel, failed, _) = crate::scan::parallel::build_tree(&dir, options, 3, 1, |_| {
+        seen += 1;
+        true
+    })
+    .expect("nothing asked the scan to stop");
+    let _ = std::fs::remove_dir_all(&dir);
+
+    assert_eq!(failed, single_failed);
+    assert_eq!(parallel.get_total_size(), single.get_total_size());
+    assert_eq!(
+        parallel.get_total_descendants(),
+        single.get_total_descendants()
+    );
+    assert_eq!(parallel.get_total_descendants(), expected.len() as u64);
+    assert_eq!(
+        seen, directories,
+        "progress sees every directory exactly once, the root included"
+    );
+}
+
+#[test]
+fn parallel_build_stops_when_progress_says_so() {
+    let (dir, _) = fixture_tree("parallel_stop");
+    let result = crate::scan::parallel::build_tree(&dir, ScanOptions::default(), 2, 1, |_| false);
+    let _ = std::fs::remove_dir_all(&dir);
+    assert!(result.is_none(), "a stopped scan yields no tree");
+}

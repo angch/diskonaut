@@ -571,3 +571,190 @@ mod sharded {
         );
     }
 }
+
+/// The live view during a parallel scan: every folder, with running sizes, and no files.
+mod outline {
+    use ::std::ffi::{OsStr, OsString};
+    use ::std::path::{Path, PathBuf};
+    use ::std::sync::Arc;
+
+    use crate::model::{FileOrFolder, FileTree, Folder};
+    use crate::scan::{DirEntries, DirSummary, EntryMeta};
+
+    fn summary(root: &Path, relative: &str, subdirs: &[&str], files: &[u64]) -> DirSummary {
+        let mut group = DirEntries::new(Arc::from(root.join(relative).as_path()));
+        for name in subdirs {
+            group.push(
+                OsStr::new(name),
+                EntryMeta {
+                    is_dir: true,
+                    ..EntryMeta::default()
+                },
+            );
+        }
+        for (index, size) in files.iter().enumerate() {
+            group.push(
+                OsStr::new(&format!("f{index}")),
+                EntryMeta {
+                    size: *size,
+                    inode: 1 + index as u64,
+                    links: 1,
+                    ..EntryMeta::default()
+                },
+            );
+        }
+        DirSummary::of(&group)
+    }
+
+    fn folder<'a>(tree: &'a FileTree, path: &[&str]) -> &'a Folder {
+        let names: Vec<OsString> = path.iter().map(OsString::from).collect();
+        match tree.get_current_folder().path(names) {
+            Some(FileOrFolder::Folder(folder)) => folder,
+            _ => panic!("{path:?} should be a folder"),
+        }
+    }
+
+    #[test]
+    fn an_outline_has_every_folder_with_running_sizes_and_no_files() {
+        let root = PathBuf::from("/synthetic/root");
+        let mut tree = FileTree::new(Folder::new(&root), root.clone());
+        tree.add_summary(summary(&root, "", &["a"], &[]));
+        tree.add_summary(summary(&root, "a", &["b"], &[100]));
+        tree.add_summary(summary(&root, "a/b", &[], &[50, 25]));
+
+        assert_eq!(tree.get_total_size(), 175);
+        let a = folder(&tree, &["a"]);
+        assert_eq!(a.size, 175, "a holds its own file and everything under b");
+        assert_eq!(
+            a.contents.len(),
+            1,
+            "the subfolder is there; the file is not"
+        );
+        let b = folder(&tree, &["a", "b"]);
+        assert_eq!(b.size, 75);
+        assert!(b.contents.is_empty(), "files are not part of the outline");
+
+        // Descendants count files too, so the tile labels read right during the scan.
+        assert_eq!(tree.get_total_descendants(), 5, "a, b and three files");
+        assert_eq!(a.num_descendants, 4);
+        assert_eq!(b.num_descendants, 2);
+    }
+
+    /// Rolling deep directories up into the frontier must lose nothing the view shows: the root's
+    /// totals, and every folder above the frontier, agree with an outline built from everything.
+    #[test]
+    fn a_capped_outline_keeps_the_totals_it_shows() {
+        use crate::scan::Outline;
+        let root = PathBuf::from("/synthetic/root");
+        // Directories at depths 0..=5, each with one subfolder and files of a known size.
+        let chain = ["", "a", "a/b", "a/b/c", "a/b/c/d", "a/b/c/d/e"];
+        let groups: Vec<_> = chain
+            .iter()
+            .enumerate()
+            .map(|(depth, relative)| {
+                let child = chain.get(depth + 1).map(|next| {
+                    Path::new(next)
+                        .file_name()
+                        .expect("named")
+                        .to_str()
+                        .expect("utf8")
+                });
+                let subdirs: Vec<&str> = child.into_iter().collect();
+                let files: Vec<u64> = vec![100 * (depth as u64 + 1)];
+                (relative, subdirs, files)
+            })
+            .collect();
+
+        let mut full = FileTree::new(Folder::new(&root), root.clone());
+        let mut capped = FileTree::new(Folder::new(&root), root.clone());
+        let mut outline = Outline::new(root.clone(), 2, usize::MAX);
+        for (relative, subdirs, files) in &groups {
+            let sizes: Vec<u64> = files.clone();
+            let group = {
+                let mut group = DirEntries::new(Arc::from(root.join(relative).as_path()));
+                for name in subdirs {
+                    group.push(
+                        OsStr::new(name),
+                        EntryMeta {
+                            is_dir: true,
+                            ..EntryMeta::default()
+                        },
+                    );
+                }
+                for (index, size) in sizes.iter().enumerate() {
+                    group.push(
+                        OsStr::new(&format!("f{index}")),
+                        EntryMeta {
+                            size: *size,
+                            inode: 1 + index as u64,
+                            links: 1,
+                            ..EntryMeta::default()
+                        },
+                    );
+                }
+                group
+            };
+            full.add_summary(DirSummary::of(&group));
+            assert!(outline.add(&group).is_none(), "no batch until asked");
+        }
+        let summaries = outline.finish();
+        assert_eq!(
+            summaries.len(),
+            4,
+            "depths 0, 1 and 2 as they are, plus one frontier folder at depth 3 for the rest"
+        );
+        for summary in summaries {
+            capped.add_summary(summary);
+        }
+
+        assert_eq!(capped.get_total_size(), full.get_total_size());
+        assert_eq!(capped.get_total_descendants(), full.get_total_descendants());
+        for shown in ["a", "a/b", "a/b/c"] {
+            let names: Vec<OsString> = shown.split('/').map(OsString::from).collect();
+            let want = folder(&full, &shown.split('/').collect::<Vec<_>>());
+            let got = match capped.get_current_folder().path(names) {
+                Some(FileOrFolder::Folder(folder)) => folder,
+                _ => panic!("{shown} should exist in the capped outline"),
+            };
+            assert_eq!(got.size, want.size, "{shown} size");
+            assert_eq!(
+                got.num_descendants, want.num_descendants,
+                "{shown} descendants"
+            );
+        }
+        let frontier = folder(&capped, &["a", "b", "c"]);
+        assert!(
+            frontier.contents.is_empty(),
+            "below the frontier nothing is known until the scan completes"
+        );
+    }
+
+    #[test]
+    fn the_finished_tree_keeps_navigation_that_still_resolves() {
+        let root = PathBuf::from("/synthetic/root");
+        let mut outline = FileTree::new(Folder::new(&root), root.clone());
+        outline.add_summary(summary(&root, "", &["a"], &[]));
+        outline.add_summary(summary(&root, "a", &[], &[1]));
+        outline.enter_folder(OsStr::new("a"));
+
+        let mut full = FileTree::new(Folder::new(&root), root.clone());
+        let mut group = DirEntries::new(Arc::from(root.as_path()));
+        group.push(
+            OsStr::new("a"),
+            EntryMeta {
+                is_dir: true,
+                ..EntryMeta::default()
+            },
+        );
+        full.add_dir_entries(group);
+        full.adopt_navigation_from(&outline);
+        assert_eq!(full.current_folder_names, vec![OsString::from("a")]);
+
+        let mut unrelated = FileTree::new(Folder::new(&root), root.clone());
+        unrelated.adopt_navigation_from(&outline);
+        assert!(
+            unrelated.current_folder_names.is_empty(),
+            "a folder that does not exist here falls back to the root"
+        );
+    }
+}

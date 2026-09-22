@@ -232,6 +232,276 @@ impl DirEntries {
     }
 }
 
+/// What a live view needs to know about a directory while the full tree is still being built
+/// elsewhere: which subdirectories it has, and what its files add up to.
+///
+/// Cheap to make from a [`DirEntries`] and cheap to apply, so the rendering thread can keep up
+/// with the scan by outline alone and show every folder with a running size.
+#[derive(Debug)]
+pub struct DirSummary {
+    /// The directory's subdirectory entries only.
+    pub dirs: DirEntries,
+    /// What the files directly inside add up to, shared blocks counted in full.
+    pub files_size: u64,
+    /// How many entries of any kind the directory holds.
+    pub entries: u64,
+}
+
+impl DirSummary {
+    #[must_use]
+    pub fn of(directory: &DirEntries) -> Self {
+        let mut dirs = DirEntries::new(Arc::clone(&directory.path));
+        let mut files_size = 0u64;
+        for (name, meta) in directory.iter() {
+            if meta.is_dir {
+                dirs.push(name, *meta);
+            } else {
+                files_size = files_size.saturating_add(meta.size);
+            }
+        }
+        dirs.failed = directory.failed;
+        Self {
+            dirs,
+            files_size,
+            entries: directory.len() as u64,
+        }
+    }
+}
+
+/// Turns the stream of scanned directories into the outline the live view is built from.
+///
+/// The view during a scan only ever shows folders near the top of the tree, but the first version
+/// of the outline sent every directory to the rendering thread — 385k of them on a 4.2M-entry
+/// volume — and applying them saturated that thread for the whole scan, which backed up the
+/// dispatcher, which slowed the walk. So the outline stops at [`Outline::DEFAULT_DEPTH`]:
+/// directories above it are sent as they are, and everything deeper is rolled up — size, entry
+/// count and read failures — into the *frontier* folder just below the cap that contains it.
+/// Folders the view can show keep exact running totals; what lies beneath the frontier is
+/// unknown until the finished tree arrives.
+pub struct Outline {
+    root: PathBuf,
+    depth: usize,
+    batch_size: usize,
+    batch: Vec<DirSummary>,
+    batched_entries: usize,
+    /// Frontier folder (relative to the root) → rolled-up (file bytes, entries, failed).
+    rolled: ::std::collections::HashMap<PathBuf, (u64, u64, u64)>,
+}
+
+impl Outline {
+    /// How deep the outline goes. Six levels below the root is past where anyone navigates in the
+    /// first second of a scan, and on the volume measured it turns 385k summaries into about 15k.
+    pub const DEFAULT_DEPTH: usize = 6;
+
+    #[must_use]
+    pub fn new(root: PathBuf, depth: usize, batch_size: usize) -> Self {
+        Self {
+            root,
+            depth,
+            batch_size,
+            batch: Vec::with_capacity(128),
+            batched_entries: 0,
+            rolled: ::std::collections::HashMap::new(),
+        }
+    }
+
+    /// Take one scanned directory in. Returns a batch of summaries when one is ready to send.
+    pub fn add(&mut self, directory: &DirEntries) -> Option<Vec<DirSummary>> {
+        self.batched_entries += directory.len().max(1);
+        let relative = directory
+            .path
+            .strip_prefix(&self.root)
+            .unwrap_or(&directory.path);
+        if relative.components().count() <= self.depth {
+            self.batch.push(DirSummary::of(directory));
+        } else {
+            let frontier: PathBuf = relative.components().take(self.depth + 1).collect();
+            let files: u64 = directory
+                .iter()
+                .filter(|(_, meta)| !meta.is_dir)
+                .map(|(_, meta)| meta.size)
+                .sum();
+            let slot = self.rolled.entry(frontier).or_insert((0, 0, 0));
+            slot.0 = slot.0.saturating_add(files);
+            slot.1 += directory.len() as u64;
+            slot.2 += directory.failed;
+        }
+        (self.batched_entries >= self.batch_size).then(|| self.take_batch())
+    }
+
+    /// Whatever is left, once the scan is over.
+    #[must_use]
+    pub fn finish(mut self) -> Vec<DirSummary> {
+        self.take_batch()
+    }
+
+    fn take_batch(&mut self) -> Vec<DirSummary> {
+        self.batched_entries = 0;
+        for (frontier, (files_size, entries, failed)) in self.rolled.drain() {
+            let mut dirs = DirEntries::new(Arc::from(self.root.join(frontier).as_path()));
+            dirs.failed = failed;
+            self.batch.push(DirSummary {
+                dirs,
+                files_size,
+                entries,
+            });
+        }
+        ::std::mem::replace(&mut self.batch, Vec::with_capacity(128))
+    }
+}
+
+/// Building the tree on several threads at once.
+///
+/// Each builder owns a private tree and is sent every directory whose path hashes to it, so no
+/// memory is shared while the scan runs. Afterwards the trees are merged and the shared blocks
+/// every builder deferred are charged once over the result. See `docs/scan-performance.md` for
+/// the measurements behind the two constants.
+pub mod parallel {
+    use ::std::path::Path;
+    use ::std::sync::mpsc::{Receiver, SyncSender, sync_channel};
+    use ::std::thread;
+    use ::std::time::{Duration, Instant};
+
+    use super::{DirEntries, ScanOptions, scan_directories};
+    use crate::model::{FileTree, Folder};
+
+    /// Builders to run. Four hides the tree build entirely behind a 24-thread walk on a 32-core
+    /// machine; the curve is flat from there to eight.
+    pub const SHARDS: usize = 4;
+
+    /// Path components that decide a directory's builder.
+    ///
+    /// Hashing the first few components rather than the whole path is what keeps the merge
+    /// cheap: every directory under one prefix lands in one builder, so builders overlap only at
+    /// folders shallower than this and everything deeper moves into the merged tree as a whole
+    /// subtree. Hashing whole paths made the merge cost more than it saved — 74,688 folders to
+    /// reconcile on a 4.2M-entry volume against 355 at this depth. Deeper than this the busiest
+    /// builder gets unluckier again, because the largest subtrees stay indivisible.
+    pub const SHARD_DEPTH: usize = 5;
+
+    /// How long each phase took, for the benchmark.
+    #[derive(Clone, Copy, Debug, Default)]
+    pub struct Timings {
+        /// The walk, with the builders keeping pace.
+        pub built: Duration,
+        pub merged: Duration,
+        pub replayed: Duration,
+    }
+
+    /// Which builder a directory belongs to.
+    pub fn shard_of(root: &Path, path: &Path, depth: usize, shards: usize) -> usize {
+        use ::std::os::unix::ffi::OsStrExt;
+        let relative = path.strip_prefix(root).unwrap_or(path);
+        let depth = if depth == 0 { usize::MAX } else { depth };
+        let mut hash: u64 = 0xcbf2_9ce4_8422_2325;
+        for component in relative.components().take(depth) {
+            for byte in component.as_os_str().as_bytes() {
+                hash = (hash ^ u64::from(*byte)).wrapping_mul(0x0000_0100_0000_01b3);
+            }
+            // A separator, so that `ab/c` and `a/bc` do not hash alike.
+            hash = (hash ^ u64::from(b'/')).wrapping_mul(0x0000_0100_0000_01b3);
+        }
+        (hash % shards as u64) as usize
+    }
+
+    /// Walk `root` and build its tree on `shards` threads.
+    ///
+    /// `progress` sees every directory as it is dispatched, before any builder has it, and may
+    /// return `false` to stop the scan — in which case nothing is merged and `None` comes back.
+    /// Otherwise the merged, reconciled tree and the count of unreadable entries.
+    pub fn build_tree(
+        root: &Path,
+        options: ScanOptions,
+        shards: usize,
+        depth: usize,
+        mut progress: impl FnMut(&DirEntries) -> bool,
+    ) -> Option<(FileTree, u64, Timings)> {
+        let shards = shards.max(1);
+        let root = root.canonicalize().unwrap_or_else(|_| root.to_path_buf());
+        let start = Instant::now();
+
+        let mut senders = Vec::with_capacity(shards);
+        let mut builders = Vec::with_capacity(shards);
+        for index in 0..shards {
+            let (sender, receiver): (SyncSender<Vec<DirEntries>>, Receiver<Vec<DirEntries>>) =
+                sync_channel(64);
+            senders.push(sender);
+            let root = root.clone();
+            let builder = thread::Builder::new()
+                .name(format!("tree_builder_{index}"))
+                .spawn(move || {
+                    let mut tree = FileTree::deferring_shared_blocks(Folder::new(&root), root);
+                    while let Ok(batch) = receiver.recv() {
+                        for directory in batch {
+                            tree.add_dir_entries(directory);
+                        }
+                    }
+                    tree
+                })
+                .expect("spawn a tree builder");
+            builders.push(builder);
+        }
+
+        let mut outboxes: Vec<Vec<DirEntries>> = (0..shards).map(|_| Vec::new()).collect();
+        let mut queued = 0usize;
+        let mut failed = 0u64;
+        let mut stopped = false;
+        for directory in scan_directories(&root, options) {
+            if !progress(&directory) {
+                stopped = true;
+                break;
+            }
+            failed += directory.failed;
+            outboxes[shard_of(&root, &directory.path, depth, shards)].push(directory);
+            queued += 1;
+            if queued >= 256 {
+                queued = 0;
+                for (outbox, sender) in outboxes.iter_mut().zip(&senders) {
+                    if !outbox.is_empty() {
+                        let _ = sender.send(::std::mem::take(outbox));
+                    }
+                }
+            }
+        }
+        if !stopped {
+            for (outbox, sender) in outboxes.into_iter().zip(&senders) {
+                if !outbox.is_empty() {
+                    let _ = sender.send(outbox);
+                }
+            }
+        }
+        drop(senders);
+
+        let mut trees: Vec<FileTree> = builders
+            .into_iter()
+            .map(|builder| builder.join().expect("a tree builder panicked"))
+            .collect();
+        if stopped {
+            return None;
+        }
+        let built = Instant::now();
+
+        let mut tree = trees.pop().expect("at least one builder");
+        for other in trees {
+            tree.merge_from(other);
+        }
+        let merged = Instant::now();
+
+        tree.replay_deferred();
+        let replayed = Instant::now();
+
+        Some((
+            tree,
+            failed,
+            Timings {
+                built: built - start,
+                merged: merged - built,
+                replayed: replayed - merged,
+            },
+        ))
+    }
+}
+
 /// Walk `root`, yielding the contents of one directory at a time.
 ///
 /// On macOS this uses [`bulk`], which asks the kernel only for the attributes disk usage needs.

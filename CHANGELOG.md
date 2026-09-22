@@ -14,6 +14,17 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Changed
 
+- The folder tree is built on four threads while the scan runs. Each owns a private tree for the
+  directories sent to it, the trees are merged once at the end, and hard links and reflinks are
+  charged in one pass over the result. On a 4.2M-entry XFS volume the build runs at the traversal
+  floor — 0.45s against 0.62s in the benchmark — and the app, launch to first full view, goes from
+  about 0.67s to 0.47s with peak memory down from 603 MB to 581 MB. During the scan the treemap
+  shows every folder to six levels down with a running size and descendant count; deeper folders,
+  and individual files everywhere, appear when the scan completes, and the folder being viewed is
+  kept across that swap. The live total counts shared blocks in full and so reads a little high
+  until then. `--bench-stage sharded` measures the build path, `pipeline` the single-threaded one
+  it replaced.
+
 - A directory's entry names travel and are stored as one packed buffer instead of an `OsString`
   each, and the folder tree takes that buffer rather than copying names out of it — so a name is
   never allocated between the kernel and the tree. Traversal peak memory halved (134 MB to 74 MB),

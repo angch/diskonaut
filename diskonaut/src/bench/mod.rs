@@ -16,7 +16,7 @@ use ::std::sync::mpsc::{self, Receiver, SyncSender};
 use ::std::thread;
 use ::std::time::{Duration, Instant};
 
-use libdiskonaut::scan::thread_count;
+use libdiskonaut::scan::{parallel, thread_count};
 use libdiskonaut::{
     DirEntries, FileTree, Folder, ScanItem, ScanOptions, scan_directories, scan_folder,
 };
@@ -270,103 +270,21 @@ fn bench_pipeline(path: &Path, options: ScanOptions) -> StageResult {
     finish("pipeline", start, entries, failed, tree)
 }
 
-/// Which builder a directory belongs to.
-///
-/// Hashing the first `depth` components of the path relative to the scan root, rather than the
-/// whole path, is what keeps the merge cheap: every directory under one depth-`depth` prefix
-/// lands in the same shard, so shards overlap only at folders *shallower* than that, and
-/// everything deeper moves into the merged tree as a whole subtree. The price is balance — a
-/// prefix is indivisible, so one huge subtree is one shard's problem. `depth == 0` hashes the
-/// whole path, which balances perfectly and makes every ancestor a shared one.
-fn shard_of(root: &Path, path: &Path, depth: usize, shards: usize) -> usize {
-    use ::std::os::unix::ffi::OsStrExt;
-    let relative = path.strip_prefix(root).unwrap_or(path);
-    let depth = if depth == 0 { usize::MAX } else { depth };
-    let mut hash: u64 = 0xcbf2_9ce4_8422_2325;
-    for component in relative.components().take(depth) {
-        for byte in component.as_os_str().as_bytes() {
-            hash = (hash ^ u64::from(*byte)).wrapping_mul(0x0000_0100_0000_01b3);
-        }
-        // A separator, so that `ab/c` and `a/bc` do not hash alike.
-        hash = (hash ^ u64::from(b'/')).wrapping_mul(0x0000_0100_0000_01b3);
-    }
-    (hash % shards as u64) as usize
-}
-
-/// The walk feeding `shards` tree builders in parallel, then one merge and one reconciliation.
-///
-/// This is the design under test: every builder owns a private tree and never shares memory
-/// with another, so there is nothing to race on; the cost of that is a merge of the overlapping
-/// ancestors afterwards, plus replaying the shared-block sightings each builder deferred. The
-/// three phases are timed separately on stderr, since the decision rests on the last two being
-/// small.
+/// The walk feeding several tree builders at once, then one merge and one reconciliation —
+/// the parallel model the app uses, timed phase by phase on stderr.
 fn bench_sharded(path: &Path, options: ScanOptions, shards: usize, depth: usize) -> StageResult {
-    let shards = shards.max(1);
     let start = Instant::now();
-
-    let mut senders = Vec::with_capacity(shards);
-    let mut builders = Vec::with_capacity(shards);
-    for _ in 0..shards {
-        let (sender, receiver): (SyncSender<Vec<DirEntries>>, Receiver<Vec<DirEntries>>) =
-            mpsc::sync_channel(64);
-        senders.push(sender);
-        let root = path.to_path_buf();
-        builders.push(thread::spawn(move || {
-            let mut tree = FileTree::deferring_shared_blocks(Folder::new(&root), root);
-            while let Ok(batch) = receiver.recv() {
-                for directory in batch {
-                    tree.add_dir_entries(directory);
-                }
-            }
-            tree
-        }));
-    }
-
-    let mut outboxes: Vec<Vec<DirEntries>> = (0..shards).map(|_| Vec::new()).collect();
-    let mut queued = 0usize;
     let mut entries = 0u64;
-    let mut failed = 0u64;
-    for directory in scan_directories(path, options) {
+    let (tree, failed, timings) = parallel::build_tree(path, options, shards, depth, |directory| {
         entries += directory.len() as u64;
-        failed += directory.failed;
-        outboxes[shard_of(path, &directory.path, depth, shards)].push(directory);
-        queued += 1;
-        if queued >= 256 {
-            queued = 0;
-            for (outbox, sender) in outboxes.iter_mut().zip(&senders) {
-                if !outbox.is_empty() {
-                    let _ = sender.send(std::mem::take(outbox));
-                }
-            }
-        }
-    }
-    for (outbox, sender) in outboxes.into_iter().zip(&senders) {
-        if !outbox.is_empty() {
-            let _ = sender.send(outbox);
-        }
-    }
-    drop(senders);
-
-    let mut trees: Vec<FileTree> = builders
-        .into_iter()
-        .map(|builder| builder.join().expect("a tree builder panicked"))
-        .collect();
-    let built = Instant::now();
-
-    let mut tree = trees.pop().expect("at least one shard");
-    for other in trees {
-        tree.merge_from(other);
-    }
-    let merged = Instant::now();
-
-    tree.replay_deferred();
-    let replayed = Instant::now();
-
+        true
+    })
+    .expect("nothing asked the scan to stop");
     eprintln!(
         "  sharded x{shards} depth {depth}: walk+build {:.3}s  merge {:.3}s  replay {:.3}s",
-        (built - start).as_secs_f64(),
-        (merged - built).as_secs_f64(),
-        (replayed - merged).as_secs_f64(),
+        timings.built.as_secs_f64(),
+        timings.merged.as_secs_f64(),
+        timings.replayed.as_secs_f64(),
     );
     finish("sharded", start, entries, failed, tree)
 }

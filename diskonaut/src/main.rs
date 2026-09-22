@@ -20,7 +20,8 @@ use ::std::{thread, time};
 use clap::Parser;
 use cli::Opt;
 use error::Error;
-use libdiskonaut::{ScanOptions, scan_directories};
+use libdiskonaut::scan::parallel;
+use libdiskonaut::{Outline, ScanOptions};
 
 use ::ratatui::backend::Backend;
 use ratatui::backend::CrosstermBackend;
@@ -199,33 +200,47 @@ fn start<B>(
                 let loaded = loaded.clone();
                 let running = running.clone();
                 move || {
-                    let mut batch = Vec::with_capacity(128);
-                    let mut batched_entries = 0usize;
-                    'scanning: for directory in scan_directories(&path, scan_options) {
-                        if !running.load(Ordering::Acquire) {
-                            break 'scanning;
-                        }
-                        batched_entries += directory.len().max(1);
-                        batch.push(directory);
-                        if batched_entries >= SCAN_BATCH_SIZE {
-                            batched_entries = 0;
-                            let full = std::mem::replace(&mut batch, Vec::with_capacity(128));
-                            if instruction_sender
-                                .send(Instruction::AddScannedDirectories(full))
-                                .is_err()
-                            {
-                                // if we fail to send an instruction here, this likely means the program has
-                                // ended and we need to break this loop as well in order not to hang
-                                break 'scanning;
+                    // The scan runs here; the tree is built on `parallel::SHARDS` threads of its
+                    // own. This thread sends the rendering thread an outline of each directory as
+                    // it goes past, so the view can follow the scan, and the finished tree once
+                    // the builders are merged.
+                    let progress_sender = instruction_sender.clone();
+                    let progress_running = running.clone();
+                    let mut outline =
+                        Outline::new(path.clone(), Outline::DEFAULT_DEPTH, SCAN_BATCH_SIZE);
+                    let built = parallel::build_tree(
+                        &path,
+                        scan_options,
+                        parallel::SHARDS,
+                        parallel::SHARD_DEPTH,
+                        |directory| {
+                            if !progress_running.load(Ordering::Acquire) {
+                                return false;
                             }
-                        }
-                    }
+                            if let Some(batch) = outline.add(directory) {
+                                // A failed send means the program has ended; stop rather than hang.
+                                if progress_sender
+                                    .send(Instruction::AddScannedSummaries(batch))
+                                    .is_err()
+                                {
+                                    return false;
+                                }
+                            }
+                            true
+                        },
+                    );
                     if running.load(Ordering::Acquire) {
-                        if !batch.is_empty() {
+                        if let Some((mut tree, failed, _)) = built {
+                            let rest = outline.finish();
+                            if !rest.is_empty() {
+                                let _ =
+                                    instruction_sender.send(Instruction::AddScannedSummaries(rest));
+                            }
+                            tree.failed_to_read = failed;
                             let _ =
-                                instruction_sender.send(Instruction::AddScannedDirectories(batch));
+                                instruction_sender.send(Instruction::ScanComplete(Box::new(tree)));
+                            let _ = instruction_sender.send(Instruction::StartUi);
                         }
-                        let _ = instruction_sender.send(Instruction::StartUi);
                         loaded.store(true, Ordering::Release);
                     }
                 }
