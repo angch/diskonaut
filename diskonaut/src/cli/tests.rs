@@ -42,3 +42,21 @@ fn resolve_folder_errors_for_missing_path() {
 fn cli_definition_is_valid() {
     Opt::command().debug_assert();
 }
+
+#[test]
+fn resolve_folder_resolves_symlinks() {
+    let dir = std::env::temp_dir().join("diskonaut_cli_symlink_target");
+    let _ = std::fs::remove_dir_all(&dir);
+    std::fs::create_dir_all(&dir).expect("create temp dir");
+    let link = std::env::temp_dir().join("diskonaut_cli_symlink_link");
+    let _ = std::fs::remove_file(&link);
+    std::os::unix::fs::symlink(&dir, &link).expect("create symlink");
+
+    let opt = Opt::parse_from(["diskonaut", link.to_str().unwrap()]);
+    let resolved = opt.resolve_folder().expect("resolve folder");
+    let expected = dir.canonicalize().unwrap();
+    let _ = std::fs::remove_file(&link);
+    let _ = std::fs::remove_dir_all(&dir);
+
+    assert_eq!(resolved, expected);
+}

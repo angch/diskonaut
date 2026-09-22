@@ -127,7 +127,8 @@ mod fallback {
         options: ScanOptions,
     ) -> impl Iterator<Item = DirEntries> {
         let apparent = options.show_apparent_size;
-        let root: Arc<Path> = Arc::from(root);
+        let root_canon = root.canonicalize().unwrap_or_else(|_| root.to_path_buf());
+        let root: Arc<Path> = Arc::from(root_canon.as_path());
         let descend = descend_predicate(&root, options);
         let mut walk = walk(
             &root,
@@ -190,21 +191,29 @@ mod fallback {
                 });
 
                 match &mut open {
-                    Some(open) if open.path == parent_path => match named {
-                        Some(named) => open.entries.push(named),
-                        None => open.failed += 1,
-                    },
+                    Some(open)
+                        if Arc::ptr_eq(&open.path, &parent_path) || open.path == parent_path =>
+                    {
+                        match named {
+                            Some(named) => open.entries.push(named),
+                            None => open.failed += 1,
+                        }
+                    }
                     // A different directory: start its group, and hand back the finished one.
                     // The new group already holds this entry, so nothing is lost by returning.
                     _ => {
                         let failed = u64::from(named.is_none());
+                        let mut entries = Vec::with_capacity(32);
+                        if let Some(named) = named {
+                            entries.push(named);
+                        }
                         let finished = open.replace(DirEntries {
                             path: parent_path,
-                            entries: named.into_iter().collect(),
+                            entries,
                             failed,
                         });
-                        if finished.is_some() {
-                            return finished;
+                        if let Some(finished) = finished {
+                            return Some(finished);
                         }
                     }
                 }
@@ -241,12 +250,16 @@ const MAX_SCAN_THREADS: usize = 8;
 
 /// Walk `root` and yield each filesystem entry (or a read error marker).
 pub fn scan_folder(root: impl AsRef<Path>, options: ScanOptions) -> impl Iterator<Item = ScanItem> {
+    let root = root
+        .as_ref()
+        .canonicalize()
+        .unwrap_or_else(|_| root.as_ref().to_path_buf());
     let threads = thread_count(options);
     let apparent = options.show_apparent_size;
-    let descend = descend_predicate(root.as_ref(), options);
+    let descend = descend_predicate(&root, options);
 
     walk(
-        root.as_ref(),
+        &root,
         threads,
         Order::Completion,
         Options::default(),
@@ -336,7 +349,6 @@ fn entry_size(metadata: &::dua_core::Metadata, apparent: bool) -> u64 {
 
 #[cfg(not(target_os = "macos"))]
 fn entry_size(metadata: &::dua_core::Metadata, apparent: bool) -> u64 {
-    use ::std::os::unix::fs::MetadataExt;
     if apparent {
         metadata.len()
     } else {
@@ -346,13 +358,16 @@ fn entry_size(metadata: &::dua_core::Metadata, apparent: bool) -> u64 {
 
 /// Walk `root` and populate a [`FileTree`]. Returns the tree and a count of read failures.
 pub fn scan_into_tree(root: impl AsRef<Path>, options: ScanOptions) -> (FileTree, u64) {
-    let root_path = root.as_ref().to_path_buf();
-    let mut tree = FileTree::new(Folder::new(root.as_ref()), root_path.clone());
+    let root_path = root
+        .as_ref()
+        .canonicalize()
+        .unwrap_or_else(|_| root.as_ref().to_path_buf());
+    let mut tree = FileTree::new(Folder::new(&root_path), root_path.clone());
     let mut failed_to_read = 0u64;
 
     for directory in scan_directories(&root_path, options) {
         failed_to_read += directory.failed;
-        tree.add_dir_entries(&directory.path, &directory.entries);
+        tree.add_dir_entries(&directory.path, directory.entries);
     }
 
     (tree, failed_to_read)

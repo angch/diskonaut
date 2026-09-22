@@ -115,15 +115,15 @@ where
     pub fn add_scanned_directories(&mut self, directories: Vec<DirEntries>) {
         let mut failed = 0;
         let mut last_path = None;
-        for directory in &directories {
+        for directory in directories {
             failed += directory.failed;
             self.file_tree
-                .add_dir_entries(&directory.path, &directory.entries);
-            last_path = Some(directory.path.to_path_buf());
+                .add_dir_entries(&directory.path, directory.entries);
+            last_path = Some(directory.path);
         }
         self.file_tree.failed_to_read += failed;
-        if last_path.is_some() {
-            self.ui_effects.last_read_path = last_path;
+        if let Some(path) = last_path {
+            self.ui_effects.last_read_path = Some(path.to_path_buf());
         }
     }
     pub fn reset_ui_mode(&mut self) {

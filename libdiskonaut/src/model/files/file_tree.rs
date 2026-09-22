@@ -13,12 +13,13 @@ pub struct FileTree {
     hard_links: HardLinks,
     /// Reused between calls: how much size to add at each depth from the base folder down.
     size_at_depth: Vec<u128>,
-    /// Reused between calls by [`FileTree::add_entry`].
-    single_entry: Vec<NamedEntry>,
 }
 
 impl FileTree {
     pub fn new(base_folder: Folder, path_in_filesystem: PathBuf) -> Self {
+        let path_in_filesystem = path_in_filesystem
+            .canonicalize()
+            .unwrap_or(path_in_filesystem);
         FileTree {
             base_folder,
             current_folder_names: Vec::new(),
@@ -27,7 +28,6 @@ impl FileTree {
             failed_to_read: 0,
             hard_links: HardLinks::default(),
             size_at_depth: Vec::new(),
-            single_entry: Vec::new(),
         }
     }
     pub fn get_total_size(&self) -> u128 {
@@ -82,7 +82,7 @@ impl FileTree {
     ///
     /// Resolving `dir_path` is O(depth), and doing it once for the whole directory rather than
     /// once per entry is what keeps tree building off the critical path of a fast walk.
-    pub fn add_dir_entries(&mut self, dir_path: &Path, entries: &[NamedEntry]) {
+    pub fn add_dir_entries(&mut self, dir_path: &Path, entries: Vec<NamedEntry>) {
         // A directory from outside the scanned tree has no place in it. Silently folding such a
         // path into the base folder, as skipping a component count would, invents entries.
         let Ok(relative) = dir_path.strip_prefix(&self.path_in_filesystem) else {
@@ -98,22 +98,18 @@ impl FileTree {
             // The scan root itself, which is not an entry inside the tree.
             return;
         };
-        // Taken out of `self` so the shared path below can borrow the rest of it.
-        let mut single = std::mem::take(&mut self.single_entry);
-        single.clear();
-        single.push(NamedEntry {
+        let single = vec![NamedEntry {
             name: name.to_os_string(),
             meta,
-        });
-        self.add_relative_dir_entries(parent, &single);
-        self.single_entry = single;
+        }];
+        self.add_relative_dir_entries(parent, single);
     }
     /// Add one directory's entries, given that directory's path relative to the scan root.
     ///
     /// A hard-linked file is charged only to the folders that have not already counted it, which
     /// is what makes each folder's size the space actually held beneath it rather than the sum of
     /// its entries. See [`HardLinks`].
-    fn add_relative_dir_entries(&mut self, relative_dir: &Path, entries: &[NamedEntry]) {
+    fn add_relative_dir_entries(&mut self, relative_dir: &Path, entries: Vec<NamedEntry>) {
         let depth = relative_dir.components().count();
         let Self {
             base_folder,
@@ -124,21 +120,30 @@ impl FileTree {
 
         size_at_depth.clear();
         size_at_depth.resize(depth + 1, 0);
-        for entry in entries {
+        let mut normal_size = 0u128;
+        for entry in &entries {
             if entry.meta.is_dir {
                 continue;
             }
             let size = u128::from(entry.meta.size);
-            let charged_down_to = if entry.meta.is_hardlinked() {
-                hard_links.charge(entry.meta.inode, entry.meta.size, relative_dir)
+            if entry.meta.is_hardlinked() {
+                let charged_down_to = hard_links.charge_with_depth(
+                    entry.meta.inode,
+                    entry.meta.size,
+                    relative_dir,
+                    depth,
+                );
+                let first_uncharged = charged_down_to.map_or(0, |charged| charged + 1);
+                for folder_size in &mut size_at_depth[first_uncharged.min(depth + 1)..] {
+                    *folder_size += size;
+                }
             } else {
-                None
-            };
-            // Folders above and including the deepest one already charged keep their totals; the
-            // ones below it are seeing this file for the first time.
-            let first_uncharged = charged_down_to.map_or(0, |charged| charged + 1);
-            for folder_size in &mut size_at_depth[first_uncharged.min(depth + 1)..] {
-                *folder_size += size;
+                normal_size += size;
+            }
+        }
+        if normal_size > 0 {
+            for folder_size in &mut size_at_depth[..] {
+                *folder_size += normal_size;
             }
         }
 

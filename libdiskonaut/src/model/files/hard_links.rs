@@ -1,17 +1,41 @@
 use ::std::collections::HashMap;
 use ::std::collections::hash_map::Entry;
-use ::std::ffi::OsString;
-use ::std::path::{Component, Path};
+use ::std::hash::{BuildHasherDefault, Hasher};
+use ::std::path::{Path, PathBuf};
 
-/// Directory components, relative to the scan root, of a folder holding a link to a file.
-type Directory = Vec<OsString>;
+#[derive(Default)]
+struct U64Hasher(u64);
+
+impl Hasher for U64Hasher {
+    #[inline]
+    fn finish(&self) -> u64 {
+        self.0
+    }
+    #[inline]
+    fn write(&mut self, bytes: &[u8]) {
+        for &b in bytes {
+            self.0 = self
+                .0
+                .wrapping_mul(0x517cc1b727220a95)
+                .wrapping_add(b as u64);
+        }
+    }
+    #[inline]
+    fn write_u64(&mut self, i: u64) {
+        let mut x = i.wrapping_mul(0xff51afd7ed558ccd);
+        x ^= x >> 32;
+        self.0 = x;
+    }
+}
+
+type FastMap<K, V> = HashMap<K, V, BuildHasherDefault<U64Hasher>>;
 
 /// A file reachable by more than one path, and where those paths were.
 struct LinkedFile {
     size: u64,
-    /// One entry per distinct folder holding a link, in the order they were found. A file's link
-    /// count bounds this, and files with many links are rare, so it stays short in practice.
-    directories: Vec<Directory>,
+    /// One entry per distinct folder holding a link, in the order they were found.
+    /// Stores the path relative to scan root, and its depth.
+    directories: Vec<(PathBuf, usize)>,
 }
 
 /// Charges each hard-linked file to any one folder at most once.
@@ -24,14 +48,14 @@ struct LinkedFile {
 /// the root containing both is 1 KiB.
 #[derive(Default)]
 pub struct HardLinks {
-    files: HashMap<u64, LinkedFile>,
+    files: FastMap<u64, LinkedFile>,
 }
 
 /// How many leading components two directories share.
-fn shared_components(left: &[OsString], right: &Path) -> usize {
-    left.iter()
-        .zip(right.components().map(Component::as_os_str))
-        .take_while(|(left, right)| left.as_os_str() == *right)
+fn shared_components(left: &Path, right: &Path) -> usize {
+    left.components()
+        .zip(right.components())
+        .take_while(|(l, r)| l == r)
         .count()
 }
 
@@ -47,6 +71,17 @@ impl HardLinks {
     /// ancestor of some earlier link, and collapsing the earlier links into a single common
     /// ancestor would forget the deeper folders among them.
     pub fn charge(&mut self, inode: u64, size: u64, directory: &Path) -> Option<usize> {
+        self.charge_with_depth(inode, size, directory, directory.components().count())
+    }
+
+    /// Record a link with a known `directory` depth, avoiding recount on repeated links in the same folder.
+    pub fn charge_with_depth(
+        &mut self,
+        inode: u64,
+        size: u64,
+        directory: &Path,
+        depth: usize,
+    ) -> Option<usize> {
         match self.files.entry(inode) {
             Entry::Occupied(mut seen) => {
                 let seen = seen.get_mut();
@@ -56,23 +91,21 @@ impl HardLinks {
                     // Two different sizes cannot be the same file, so charge this one in full.
                     return None;
                 }
-                let depth = directory.components().count();
                 let mut deepest = 0;
-                let mut already_listed = false;
-                for existing in &seen.directories {
+                for (existing, existing_depth) in &seen.directories {
+                    if existing.as_path() == directory {
+                        return Some(*existing_depth);
+                    }
                     let shared = shared_components(existing, directory);
                     deepest = deepest.max(shared);
-                    already_listed |= shared == depth && existing.len() == depth;
                 }
-                if !already_listed {
-                    seen.directories.push(components_of(directory));
-                }
+                seen.directories.push((directory.to_path_buf(), depth));
                 Some(deepest)
             }
             Entry::Vacant(slot) => {
                 slot.insert(LinkedFile {
                     size,
-                    directories: vec![components_of(directory)],
+                    directories: vec![(directory.to_path_buf(), depth)],
                 });
                 None
             }
@@ -84,11 +117,4 @@ impl HardLinks {
     pub fn tracked(&self) -> usize {
         self.files.len()
     }
-}
-
-fn components_of(directory: &Path) -> Directory {
-    directory
-        .components()
-        .map(|component| component.as_os_str().to_os_string())
-        .collect()
 }

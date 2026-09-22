@@ -49,7 +49,7 @@ impl Opt {
         if !folder.as_path().is_dir() {
             return Err(Error::FolderNotFound(folder.to_string_lossy().into_owned()));
         }
-        Ok(folder)
+        Ok(folder.canonicalize().unwrap_or(folder))
     }
 }
 

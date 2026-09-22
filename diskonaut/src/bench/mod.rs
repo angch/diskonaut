@@ -165,7 +165,7 @@ fn bench_scan(path: &Path, options: ScanOptions, build_tree: bool) -> StageResul
         entries += directory.entries.len() as u64;
         failed += directory.failed;
         if build_tree {
-            tree.add_dir_entries(&directory.path, &directory.entries);
+            tree.add_dir_entries(&directory.path, directory.entries);
         } else {
             total_size += directory
                 .entries
@@ -194,19 +194,20 @@ const BATCH: usize = 4096;
 fn bench_pipeline(path: &Path, options: ScanOptions) -> StageResult {
     let start = Instant::now();
     let (sender, receiver): (SyncSender<Vec<DirEntries>>, Receiver<Vec<DirEntries>>) =
-        mpsc::sync_channel(16);
+        mpsc::sync_channel(64);
 
     let scanner = thread::spawn({
         let path = path.to_path_buf();
         move || {
-            let mut batch = Vec::new();
+            let mut batch = Vec::with_capacity(128);
             let mut batched = 0usize;
             for directory in scan_directories(&path, options) {
                 batched += directory.entries.len().max(1);
                 batch.push(directory);
                 if batched >= BATCH {
                     batched = 0;
-                    if sender.send(std::mem::take(&mut batch)).is_err() {
+                    let to_send = std::mem::replace(&mut batch, Vec::with_capacity(128));
+                    if sender.send(to_send).is_err() {
                         return;
                     }
                 }
@@ -222,7 +223,7 @@ fn bench_pipeline(path: &Path, options: ScanOptions) -> StageResult {
         for directory in batch {
             entries += directory.entries.len() as u64;
             failed += directory.failed;
-            tree.add_dir_entries(&directory.path, &directory.entries);
+            tree.add_dir_entries(&directory.path, directory.entries);
         }
     }
     let _ = scanner.join();

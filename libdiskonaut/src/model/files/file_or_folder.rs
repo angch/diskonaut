@@ -1,8 +1,10 @@
-use ::std::collections::{HashMap, VecDeque};
+use ::std::collections::VecDeque;
 use ::std::ffi::{OsStr, OsString};
 use ::std::path::{Path, PathBuf};
 
 use crate::scan::{EntryMeta, NamedEntry};
+
+pub type ContentsMap = ::std::collections::HashMap<OsString, FileOrFolder>;
 
 #[derive(Debug, Clone)]
 pub enum FileOrFolder {
@@ -19,16 +21,15 @@ impl FileOrFolder {
     }
 }
 
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, Copy)]
 pub struct File {
-    pub name: OsString,
     pub size: u128,
 }
 
 #[derive(Debug, Clone)]
 pub struct Folder {
     pub name: OsString,
-    pub contents: HashMap<OsString, FileOrFolder>,
+    pub contents: ContentsMap,
     pub size: u128,
     pub num_descendants: u64,
 }
@@ -37,7 +38,7 @@ impl From<OsString> for Folder {
     fn from(name: OsString) -> Self {
         Folder {
             name,
-            contents: HashMap::new(),
+            contents: ContentsMap::default(),
             size: 0,
             num_descendants: 0,
         }
@@ -51,55 +52,48 @@ impl Folder {
             .expect("could not get path base name");
         Self {
             name: base_folder_name.to_os_string(),
-            contents: HashMap::new(),
+            contents: ContentsMap::default(),
             size: 0,
             num_descendants: 0,
         }
     }
 
     /// Insert an entry addressed by its path components relative to this folder.
-    ///
-    /// The descent is iterative and borrows each component, so inserting a file `n` levels deep
-    /// costs `n` hash lookups and one name allocation for the levels that are new, rather than
-    /// rebuilding a `PathBuf` suffix at every level as the recursive version did.
-    pub fn add_entry<'a>(
+    pub fn add_entry(
         &mut self,
         meta: EntryMeta,
-        relative_path: impl Iterator<Item = &'a OsStr>,
+        relative_path: impl IntoIterator<Item = impl AsRef<OsStr>>,
     ) {
-        let size = u128::from(meta.size);
-        let mut components = relative_path.peekable();
+        let mut components = relative_path.into_iter().peekable();
         let mut folder = self;
-
         while let Some(name) = components.next() {
-            if !meta.is_dir {
-                folder.size += size;
-            }
+            let name = name.as_ref();
+            let size = u128::from(meta.size);
+            folder.size += size;
             folder.num_descendants += 1;
-
             if components.peek().is_some() {
-                folder = match folder
-                    .contents
-                    .entry(name.to_os_string())
-                    .or_insert_with(|| FileOrFolder::Folder(Folder::from(name.to_os_string())))
-                {
-                    FileOrFolder::Folder(folder) => folder,
-                    FileOrFolder::File(_) => unreachable!("got a file in the middle of a path"),
+                if !folder.contents.contains_key(name) {
+                    folder.contents.insert(
+                        name.to_os_string(),
+                        FileOrFolder::Folder(Folder::from(name.to_os_string())),
+                    );
+                }
+                folder = match folder.contents.get_mut(name) {
+                    Some(FileOrFolder::Folder(folder)) => folder,
+                    _ => unreachable!("got a file in the middle of a path"),
                 };
             } else if meta.is_dir {
                 // A directory can already exist here if one of its children was reported first.
+                if !folder.contents.contains_key(name) {
+                    folder.contents.insert(
+                        name.to_os_string(),
+                        FileOrFolder::Folder(Folder::from(name.to_os_string())),
+                    );
+                }
+            } else {
                 folder
                     .contents
-                    .entry(name.to_os_string())
-                    .or_insert_with(|| FileOrFolder::Folder(Folder::from(name.to_os_string())));
-            } else {
-                folder.contents.insert(
-                    name.to_os_string(),
-                    FileOrFolder::File(File {
-                        name: name.to_os_string(),
-                        size,
-                    }),
-                );
+                    .insert(name.to_os_string(), FileOrFolder::File(File { size }));
             }
         }
     }
@@ -112,7 +106,7 @@ impl Folder {
     pub fn add_dir_entries<'a>(
         &mut self,
         dir_path: impl Iterator<Item = &'a OsStr>,
-        entries: &[NamedEntry],
+        entries: Vec<NamedEntry>,
         size_at_depth: &[u128],
     ) {
         let contained_count = entries.len() as u64;
@@ -122,30 +116,34 @@ impl Folder {
         folder.size += size_at(0);
         folder.num_descendants += contained_count;
         for (depth, name) in dir_path.enumerate() {
-            folder = match folder
-                .contents
-                .entry(name.to_os_string())
-                .or_insert_with(|| FileOrFolder::Folder(Folder::from(name.to_os_string())))
-            {
-                FileOrFolder::Folder(folder) => folder,
-                FileOrFolder::File(_) => unreachable!("got a file in the middle of a path"),
+            if !folder.contents.contains_key(name) {
+                folder.contents.insert(
+                    name.to_os_string(),
+                    FileOrFolder::Folder(Folder::from(name.to_os_string())),
+                );
+            }
+            folder = match folder.contents.get_mut(name) {
+                Some(FileOrFolder::Folder(next)) => next,
+                _ => unreachable!("got a file in the middle of a path"),
             };
             folder.size += size_at(depth + 1);
             folder.num_descendants += contained_count;
         }
 
+        folder.contents.reserve(entries.len());
         for entry in entries {
             if entry.meta.is_dir {
                 // The directory may already be here if its own contents were read first.
-                folder
-                    .contents
-                    .entry(entry.name.clone())
-                    .or_insert_with(|| FileOrFolder::Folder(Folder::from(entry.name.clone())));
+                if let ::std::collections::hash_map::Entry::Vacant(slot) =
+                    folder.contents.entry(entry.name)
+                {
+                    let name = slot.key().clone();
+                    slot.insert(FileOrFolder::Folder(Folder::from(name)));
+                }
             } else {
                 folder.contents.insert(
-                    entry.name.clone(),
+                    entry.name,
                     FileOrFolder::File(File {
-                        name: entry.name.clone(),
                         size: u128::from(entry.meta.size),
                     }),
                 );

@@ -190,15 +190,19 @@ fn start<B>(
                 let path = path.clone();
                 let instruction_sender = instruction_sender.clone();
                 let loaded = loaded.clone();
+                let running = running.clone();
                 move || {
-                    let mut batch = Vec::new();
+                    let mut batch = Vec::with_capacity(128);
                     let mut batched_entries = 0usize;
                     'scanning: for directory in scan_directories(&path, scan_options) {
+                        if !running.load(Ordering::Acquire) {
+                            break 'scanning;
+                        }
                         batched_entries += directory.entries.len().max(1);
                         batch.push(directory);
                         if batched_entries >= SCAN_BATCH_SIZE {
                             batched_entries = 0;
-                            let full = std::mem::take(&mut batch);
+                            let full = std::mem::replace(&mut batch, Vec::with_capacity(128));
                             if instruction_sender
                                 .send(Instruction::AddScannedDirectories(full))
                                 .is_err()
@@ -209,11 +213,14 @@ fn start<B>(
                             }
                         }
                     }
-                    if !batch.is_empty() {
-                        let _ = instruction_sender.send(Instruction::AddScannedDirectories(batch));
+                    if running.load(Ordering::Acquire) {
+                        if !batch.is_empty() {
+                            let _ =
+                                instruction_sender.send(Instruction::AddScannedDirectories(batch));
+                        }
+                        let _ = instruction_sender.send(Instruction::StartUi);
+                        loaded.store(true, Ordering::Release);
                     }
-                    let _ = instruction_sender.send(Instruction::StartUi);
-                    loaded.store(true, Ordering::Release);
                 }
             })
             .unwrap(),

@@ -452,6 +452,40 @@ and picks an implementation by `cfg`. A Linux walker slots in beside `bulk`, yie
 UI — is unchanged. Add a `linux-*` benchmark stage next to the `dua-*` ones so the old and new
 walkers can be compared on the same tree in one run, which is what made the macOS work tractable.
 
+## Linux ext4 performance & allocator pressure
+
+On Linux (ext4, ~2.24M entries, ~170k hard-linked files on `/data`), `dua-tree` initially outperformed
+diskonaut's tree building because of allocator pressure in the model and hard link accounting.
+
+### Results on `/data` (warm cache)
+
+| Stage | Time | Entries | Throughput | Reported Size | Hard Links |
+| --- | --- | --- | --- | --- | --- |
+| `dua-walk` | 2.23s | 2,236,001 | 1,000,975 entries/s | 288.6 GiB | (none) |
+| `dua-tree` | 9.05s | 2,236,001 | 247,168 entries/s | 221.2 GiB | 170,057 |
+| `walk` | 2.50s | 2,236,000 | 893,250 entries/s | 288.6 GiB | (none) |
+| `tree` | 6.58s | 2,236,000 | 339,893 entries/s | 221.2 GiB | 170,057 |
+| `pipeline` | 5.49s | 2,236,000 | 407,173 entries/s | 221.2 GiB | 170,057 |
+
+`pipeline` completes in **5.49s** (~407k entries/s), beating `dua-tree` (9.05s) by ~39% by overlapping
+the parallel walk with concurrent tree building across an MPSC channel.
+
+### Key optimizations
+
+1. **Eliminated 2.2M heap allocations in tree construction**: `FileTree::add_dir_entries` and
+   `Folder::add_dir_entries` accept `Vec<NamedEntry>` by value. Instead of allocating a cloned `OsString`
+   for every file and then dropping the original in the caller, `entry.name` moves directly into
+   `Folder.contents`.
+2. **Removed redundant `File.name` field**: `File` previously stored an unused `name: OsString` that was already
+   the key in `Folder.contents`. Removing it eliminated 2.2M string allocations and shrunk the struct.
+3. **Optimized `HardLinks`**:
+   - Replaced `Vec<Vec<OsString>>` path storage with `Vec<(PathBuf, usize)>`, cutting allocations down to 1 per path.
+   - Introduced a fast non-cryptographic `U64Hasher` (`SplitMix64`) for the 170k-inode map.
+   - Added `charge_with_depth` to reuse the caller's directory depth instead of repeatedly parsing path components.
+4. **Pointer equality in `group_by_directory`**: Replaced string equality with `Arc::ptr_eq(&open.path, &parent_path)`.
+5. **Pre-allocated channel batches**: Sized batch vectors and enlarged sync channel buffer to prevent worker stalls.
+6. **Symlink root canonicalization**: Ensured symlinked scan roots evaluate correctly under `dua-core` walker.
+
 ## Known gaps
 
 - The reported total for `/` is ~706 GiB against 884 GiB used. The difference is APFS snapshots,

@@ -258,7 +258,7 @@ fn entries_outside_the_scan_root_are_ignored() {
     let mut tree = crate::FileTree::new(crate::Folder::new(&dir), dir.clone());
     tree.add_dir_entries(
         std::path::Path::new("/somewhere/else"),
-        &[NamedEntry {
+        vec![NamedEntry {
             name: "intruder".into(),
             meta: EntryMeta {
                 size: 4096,
@@ -424,5 +424,44 @@ fn deleting_every_link_in_a_folder_does_not_underflow() {
     assert_eq!(tree.get_total_size(), 0);
     assert_eq!(tree.get_total_descendants(), 0);
 
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+#[test]
+fn scan_into_tree_follows_symlinked_root_directory() {
+    let dir = temp_scan_dir("symlink_root_target");
+    let file = dir.join("file.txt");
+    File::create(&file)
+        .expect("create file")
+        .write_all(b"symlink root test")
+        .expect("write file");
+    let link = std::env::temp_dir().join("diskonaut_scan_test_symlink_root_link");
+    let _ = std::fs::remove_file(&link);
+    std::os::unix::fs::symlink(&dir, &link).expect("create symlink");
+
+    let options = ScanOptions {
+        show_apparent_size: true,
+        ..ScanOptions::default()
+    };
+    let (tree, failed) = scan_into_tree(&link, options);
+    let _ = std::fs::remove_file(&link);
+    let _ = std::fs::remove_dir_all(&dir);
+
+    assert_eq!(failed, 0);
+    assert_eq!(tree.get_total_descendants(), 1);
+    assert_eq!(tree.get_total_size(), 17);
+}
+
+#[test]
+fn one_file_system_scans_same_device() {
+    let (dir, expected) = fixture_tree("one_fs_fixture");
+    let options = ScanOptions {
+        one_file_system: true,
+        show_apparent_size: true,
+        ..ScanOptions::default()
+    };
+    let (tree, failed) = scan_into_tree(&dir, options);
+    assert_eq!(failed, 0);
+    assert_eq!(tree.get_total_descendants(), expected.len() as u64);
     let _ = std::fs::remove_dir_all(&dir);
 }
