@@ -39,6 +39,16 @@ fn draw_empty_folder(buf: &mut Buffer, area: Rect) {
     draw_rect_on_grid(buf, (area.x, area.y), (area.width, area.height));
 }
 
+/// Whether every cell `draw_rect_on_grid` will touch for this tile is inside the buffer.
+///
+/// The borders are drawn *on* `x + width` and `y + height`, so those are the last cells used and
+/// have to be addressable, not just the interior.
+fn fits(buf: &Buffer, tile: &Tile) -> bool {
+    let area = buf.area();
+    u32::from(tile.x) + u32::from(tile.width) < u32::from(area.x) + u32::from(area.width)
+        && u32::from(tile.y) + u32::from(tile.height) < u32::from(area.y) + u32::from(area.height)
+}
+
 #[derive(Clone)]
 pub struct RectangleGrid<'a> {
     rectangles: &'a [Tile],
@@ -66,6 +76,14 @@ impl<'a> Widget for RectangleGrid<'a> {
             draw_empty_folder(buf, area);
         } else {
             for (index, tile) in self.rectangles.iter().enumerate() {
+                // Everything below indexes the buffer directly, so a tile reaching past the edge
+                // takes the whole app down rather than drawing wrong. The layout is float
+                // arithmetic over sizes that do not have to add up — shared blocks make a folder
+                // smaller than its contents — so treat "this tile does not fit" as a thing that
+                // can happen and skip it, not as an invariant worth crashing over.
+                if !fits(buf, tile) {
+                    continue;
+                }
                 let selected = if let Some(selected_rect_index) = self.selected_rect_index {
                     index == selected_rect_index
                 } else {

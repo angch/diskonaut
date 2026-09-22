@@ -90,3 +90,52 @@ fn small_files_marker_is_absent_when_everything_fits() {
 
     assert!(board.unrenderable_tile_coordinates.is_none());
 }
+
+/// A folder holding shared blocks — hard links, or XFS/btrfs reflinks — is *smaller* than the sum
+/// of the entries inside it, because the same blocks reached twice count once. The layout must
+/// still fit on the board: dividing each entry by the folder's deduplicated size gives fractions
+/// summing to well over 1.0, and tiles laid out from those run off the end of the screen.
+///
+/// This is a rendering crash, not a cosmetic one: the UI indexes the terminal buffer directly at
+/// `rect.x + rect.width`, so a tile outside the board panics the whole app.
+#[test]
+fn entries_larger_than_the_folder_holding_them_stay_on_the_board() {
+    let mut root = Folder::new(Path::new("/tmp/example"));
+    for name in ["a", "b", "c", "d"] {
+        root.add_file(std::path::PathBuf::from(name), 1_000_000);
+    }
+    // What deduplication does: four entries of 1 MB each, all the same blocks, so the folder holds
+    // 1 MB rather than 4 MB.
+    root.size = 1_000_000;
+
+    let files = files_in_folder(&root, 0);
+    let sum: f64 = files.iter().map(|file| file.percentage).sum();
+    assert!(
+        sum <= 1.0 + 1e-9,
+        "percentages must not exceed the board, got {sum}"
+    );
+
+    let area = Area {
+        x: 0,
+        y: 0,
+        width: 80,
+        height: 24,
+    };
+    let mut board = Board::new(&root);
+    board.change_area(&area);
+    board.change_files(&root);
+
+    for tile in &board.tiles {
+        assert!(
+            tile.x + tile.width <= area.width && tile.y + tile.height <= area.height,
+            "tile {:?} at {},{} sized {}x{} escapes the {}x{} board",
+            tile.name,
+            tile.x,
+            tile.y,
+            tile.width,
+            tile.height,
+            area.width,
+            area.height
+        );
+    }
+}

@@ -29,7 +29,20 @@ fn calculate_percentage(size: u128, total_size: u128, total_files_in_parent: usi
 
 pub fn files_in_folder(folder: &Folder, offset: usize) -> Vec<FileMetadata> {
     let mut files = Vec::new();
-    let total_size = folder.size;
+    // A folder is never larger than the entries inside it, but it can be *smaller*: shared blocks
+    // — hard links, or XFS/btrfs reflinks — reached twice under one folder are held once, so the
+    // folder's size is the space it occupies while each entry still reports its own full size.
+    //
+    // Dividing by the folder's size would then give fractions summing to more than 1.0 (four
+    // reflinked copies of one file give 4.0), and the layout would run off the board. The tiles
+    // are shares of the space their siblings take between them, which is what fills the board
+    // exactly and is the only reading that stays self-consistent when blocks are shared.
+    let entries_total: u128 = folder
+        .contents
+        .values()
+        .map(super::super::model::FileOrFolder::size)
+        .sum();
+    let total_size = folder.size.max(entries_total);
     for (name, file_or_folder) in &folder.contents {
         files.push({
             let size = file_or_folder.size();
