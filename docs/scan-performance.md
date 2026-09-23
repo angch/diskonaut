@@ -2308,16 +2308,27 @@ serial tail after the walk.
 
 Measured on `D:\` (3.0 TiB, 414,583 entries, warm), the `walk+build` phase is flat across one, two,
 and four shards at ~0.14s — the build is entirely hidden either way — while `merge` grows ~0.5 ms
-per shard and `replay` is a shard-independent ~7–9 ms. That tail was the whole gap between the
-`sharded` stage (~0.155s) and `pipeline` (~0.145s).
+per shard and `replay` is a shard-independent ~7–9 ms. That serial tail was the visible part of the
+gap between the `sharded` stage (~0.155s) and `pipeline` (~0.145s).
 
-Two changes closed it. `build_tree` now builds a **non-deferring** tree when `shards == 1`: a lone
-builder sees the whole tree, so no hard link can cross a shard and it charges inline exactly as the
-single-threaded `scan_into_tree` does — no deferral, no merge, no replay. And `SHARDS` is now `1` on
-Windows (`4` elsewhere). The default `sharded` stage — which is the app's real load path
-(`parallel::build_tree`, not `pipeline`, despite an earlier benchmark comment that said otherwise) —
-now reports `merge 0.000s  replay 0.000s` and matches `pipeline`. `single_shard_build_matches_the_single_threaded_tree`
-pins the one-shard path to the reference tree over a fixture that holds a hard link.
+The fix came in three parts, and the third only surfaced after the first two. `build_tree` now
+builds a **non-deferring** tree when `shards == 1`: a lone builder sees the whole tree, so no hard
+link can cross a shard and it charges inline exactly as the single-threaded `scan_into_tree` does —
+no deferral, no merge, no replay. And `SHARDS` is now `1` on Windows (`4` elsewhere). With the tail
+gone the phase line read `merge 0.000s  replay 0.000s`, yet one-shard `sharded` was still ~10–15 ms
+behind `pipeline` in `walk+build` alone. The remaining cost was `shard_of`: an FNV hash over each
+directory's path components, run per directory on the walker thread — the bottleneck thread — only
+to land on shard zero every time. The loop now skips it when `shards == 1`. After that the two
+stages interleave within noise (sharded and pipeline each win about half the rounds, medians ~6 ms
+apart, inside a ±10 ms spread), and the only thing `sharded` still does that `pipeline` does not is
+run the live-outline progress callback — real app work, not overhead.
+
+`single_shard_build_matches_the_single_threaded_tree` pins the one-shard path to the reference tree
+over a fixture that holds a hard link; skipping the hash is behaviour-preserving because `hash % 1`
+is always zero.
+
+The app's real load path is `parallel::build_tree` (the `sharded` stage), not `pipeline`, despite
+an earlier benchmark comment that said otherwise — now corrected.
 
 ## Known gaps
 

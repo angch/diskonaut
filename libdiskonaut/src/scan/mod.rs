@@ -399,9 +399,9 @@ pub mod parallel {
     /// On fast walkers (Linux, macOS) the tree build is the bottleneck, and four builders hide it
     /// entirely behind a 24-thread walk on a 32-core machine; the curve is flat from there to
     /// eight. On Windows the walk is the bottleneck — a handle per directory — so a single builder
-    /// keeps pace, and one shard skips the deferral, merge, and replay a parallel build needs (see
-    /// [`build_tree`]), matching the plain pipeline instead of paying for parallelism that a
-    /// walk-bound volume cannot use. See `docs/scan-performance.md`.
+    /// keeps pace, and one shard skips the deferral, merge, replay, and per-directory shard hash a
+    /// parallel build needs (see [`build_tree`]), matching the plain pipeline instead of paying for
+    /// parallelism that a walk-bound volume cannot use. See `docs/scan-performance.md`.
     #[cfg(not(windows))]
     pub const SHARDS: usize = 4;
     #[cfg(windows)]
@@ -499,7 +499,14 @@ pub mod parallel {
                 break;
             }
             failed += directory.failed;
-            outboxes[shard_of(&root, &directory.path, depth, shards)].push(directory);
+            // One shard means one builder: skip hashing the path to choose it — the hash runs per
+            // directory and always lands on zero, so on a walk-bound volume it is pure overhead.
+            let shard = if shards == 1 {
+                0
+            } else {
+                shard_of(&root, &directory.path, depth, shards)
+            };
+            outboxes[shard].push(directory);
             queued += 1;
             if queued >= 256 {
                 queued = 0;
