@@ -61,7 +61,7 @@ builders that share nothing:
 - `scan/mod.rs` — `scan_directories()`: per-directory batches, the seam every walker plugs into;
   `parallel::build_tree()`: the app's tree build — shard by path prefix, merge, replay;
   `Outline`/`DirSummary`: the depth-capped live view
-- `scan/bulk.rs` — macOS walker on `getattrlistbulk(2)` (see `docs/scan-performance.md`)
+- `scan/macos.rs` — macOS walker on `getattrlistbulk(2)` (see `docs/scan-performance.md`)
 - `scan/linux.rs` — Linux walker on `getdents64`/`statx`, own thread pool; also the `FS_IOC_FIEMAP`
   reflink probe. `dua-core` is only the fallback for other platforms and the benchmark baseline
 - `scan/windows.rs` — Windows walker: one handle per directory, entries read in bulk with
@@ -174,7 +174,7 @@ Exiting { app_loaded: bool }
 
 ### Adding a scan option
 1. Add field to `ScanOptions` in `libdiskonaut/src/scan/mod.rs`
-2. Thread it through **every** walker: `scan/bulk.rs` (macOS), `scan/linux.rs`, `scan/windows.rs`,
+2. Thread it through **every** walker: `scan/macos.rs` (macOS), `scan/linux.rs`, `scan/windows.rs`,
    and the `fallback` module in `scan/mod.rs` (everywhere else). The fallback is `cfg`-selected away on macOS, so it is only
    ever run by its tests here — do not assume compiling it means it works.
 3. Expose via CLI in `diskonaut/src/cli/mod.rs` and config if persistent
@@ -225,5 +225,5 @@ to `pipeline`'s — that comparison is the correctness check, not just the speed
 | `libdiskonaut/src/tiles/board.rs` | ~200+ lines — tile nav/zoom |
 | `libdiskonaut/src/tiles/treemap.rs` | ~150+ lines — squarify |
 | `libdiskonaut/src/model/files/file_tree.rs` | ~150 lines — folder tree, hard-link accounting |
-| `libdiskonaut/src/scan/bulk.rs` | ~800 lines — macOS `getattrlistbulk` walker |
+| `libdiskonaut/src/scan/macos.rs` | ~800 lines — macOS `getattrlistbulk` walker |
 | `diskonaut/src/bench/mod.rs` | ~230 lines — `--benchmark` harness |

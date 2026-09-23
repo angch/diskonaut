@@ -240,7 +240,7 @@ Check the entry count and the error count too.
 The performance work was reviewed after the fact, and the review found more than the performance
 work did. Recorded because the same traps are waiting on Linux.
 
-**Dropping the walk early did not stop it.** `BulkWalk::drop` drained the channel to release
+**Dropping the walk early did not stop it.** `MacosWalk::drop` drained the channel to release
 workers blocked on a full send — but draining guarantees every send *succeeds*, so the workers
 happily walked the entire remaining tree while the consumer waited to join them. Quitting
 diskonaut partway through a scan of `/` took **32.2s**; with a `stop` flag checked in the queue's
@@ -365,7 +365,7 @@ that does not fill them in gets the old additive behaviour rather than a wrong a
 | "Measure the walker before the model" | yes |
 | "More threads can be slower" | yes as a phenomenon; the number 8 is not |
 | Batching, `EntryMeta`, per-directory tree insert | yes, already in shared code |
-| `getattrlistbulk` walker (`scan/bulk.rs`) | no, `#[cfg(target_os = "macos")]` |
+| `getattrlistbulk` walker (`scan/macos.rs`) | no, `#[cfg(target_os = "macos")]` |
 | Firmlink handling | no, macOS has no counterpart elsewhere |
 | Inode-vs-listed-inode mount detection | the *technique* ports; on Linux `st_dev` is simpler and sufficient |
 
@@ -469,7 +469,7 @@ they matter just as much as speed:
 ### Where to put the code
 
 `libdiskonaut::scan::scan_directories()` is the seam. It returns `impl Iterator<Item = DirEntries>`
-and picks an implementation by `cfg`. A Linux walker slots in beside `bulk`, yields the same
+and picks an implementation by `cfg`. A Linux walker slots in beside `macos`, yields the same
 `DirEntries { path, entries, failed }`, and everything downstream — batching, tree building, the
 UI — is unchanged. Add a `linux-*` benchmark stage next to the `dua-*` ones so the old and new
 walkers can be compared on the same tree in one run, which is what made the macOS work tractable.
@@ -621,14 +621,14 @@ than the cluster size, and `st_blocks` as `ceil(size / 512)`, so neither `statfs
 the real allocation either — rounding the data length up to the cluster size is not available as a
 fix. The data length is the closest honest answer.
 
-`SizeAttribute` in `scan/bulk.rs` now picks the attribute per filesystem, identified by one
+`SizeAttribute` in `scan/macos.rs` now picks the attribute per filesystem, identified by one
 `fstatfs` per *device* (cached, not per directory: a scan can span a FAT stick and an APFS disk, so
 a single answer for the whole walk would be wrong, but probing every directory would tax every
 filesystem to catch a rare one).
 
 ### Testing it
 
-`scan::bulk::tests::a_fat32_volume_does_not_scan_as_empty` creates a FAT32 image with `hdiutil`,
+`scan::macos::tests::a_fat32_volume_does_not_scan_as_empty` creates a FAT32 image with `hdiutil`,
 mounts it, scans it and asserts a non-zero total. It is `#[ignore]`d because it mounts a disk image:
 
 ```
@@ -785,7 +785,7 @@ A real replacement therefore lands somewhere between 0.39s and 2.2s at its best 
 where in that range is unmeasured. It does not need to be near the bottom of it: section 5 measures
 the tree build at 0.85s, so anything under ~0.9s already makes the model the binding constraint.
 
-On Linux every benchmark stage goes through `dua-core` — `bulk` is macOS-only, and
+On Linux every benchmark stage goes through `dua-core` — `macos` is macOS-only, and
 `fallback::group_by_directory` groups the same `dua-core` walk — so `dua-walk` and `walk` measure
 the same underlying jwalk traversal. The collapse past 8 threads lives in there, not in XFS.
 
@@ -1118,7 +1118,7 @@ extent is shared. The first extent alone is not enough, and the first version of
 backwards — see the review finding below.
 
 APFS clones are the same phenomenon and are *not* handled: `getattrlistbulk` does not report
-sharing and macOS has no cheap per-file equivalent of FIEMAP. `scan/bulk.rs` sets `shared_extent: 0`
+sharing and macOS has no cheap per-file equivalent of FIEMAP. `scan/macos.rs` sets `shared_extent: 0`
 and says so.
 
 ### Testing
@@ -1351,7 +1351,7 @@ The other three, more briefly:
 - **The reflink threshold is a guess, not a measurement.** 64 KiB was chosen because it leaves 3.8%
   of files to probe on this volume. Nobody has measured how many shared bytes live below it.
 - **A scan of `/` double-counts filesystems mounted in two places**, as above. `-x` avoids it.
-- **The macOS build is unverified.** `scan/bulk.rs` needed one field adding to two `EntryMeta`
+- **The macOS build is unverified.** `scan/macos.rs` needed one field adding to two `EntryMeta`
   literals and nothing here can compile it — the module is `cfg`'d out on Linux, which is exactly
   the trap finding #7 records. It needs a build on a Mac before release.
 - **`cargo deny check` was not run**; `cargo-deny` is not installed here. `Cargo.lock` is unchanged,
@@ -1626,7 +1626,7 @@ reads a directory's names out of one `getdents64` buffer, so it can copy them in
 common case where the folder is new.
 
 That is the version worth doing, and it was not done here because it changes `NamedEntry`, which
-means restructuring `scan/bulk.rs` — macOS-only, `cfg`'d out on Linux, and therefore uncompilable
+means restructuring `scan/macos.rs` — macOS-only, `cfg`'d out on Linux, and therefore uncompilable
 from this machine. Reshaping a type blind is exactly the trap finding #7 records; adding one field
 blind was already at the edge of reasonable.
 
@@ -1733,7 +1733,7 @@ charging provisionally and reconciling, which is a larger change than the 0.05s 
 
 `pipeline = max(walk, model)` = `max(0.40, 0.68)` = **0.68s**. Every improvement to the walk is
 invisible until the model comes down, and the model's remaining win needs the packed-names change
-to `DirEntries` that the previous section declines to make blind against macOS `scan/bulk.rs`.
+to `DirEntries` that the previous section declines to make blind against macOS `scan/macos.rs`.
 
 The walk was asked to get under 0.43s. It is at 0.40s with reflink accounting and 0.35s without,
 and the next useful work is not here.
@@ -1788,7 +1788,7 @@ touches every walker. The `dua-core` fallback and the macOS `getattrlistbulk` wa
 entries before they know they have a whole directory, so they keep owned names and pack them where
 a `DirEntries` is built — one copy per entry on those paths, and none on Linux.
 
-**The macOS walker is changed but unverified.** `scan/bulk.rs` is `cfg`'d out on Linux and there is
+**The macOS walker is changed but unverified.** `scan/macos.rs` is `cfg`'d out on Linux and there is
 no Mac here, so it has been checked by reading and by `rustfmt` parsing it, and that is all. It
 needs a build and a run on macOS before release. This is the trap finding #7 records, entered
 deliberately and with the user's agreement rather than by accident.

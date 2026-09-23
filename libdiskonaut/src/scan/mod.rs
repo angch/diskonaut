@@ -10,7 +10,7 @@ use ::dua_core::{Options, Order, walk};
 use crate::model::{FileTree, Folder};
 
 #[cfg(target_os = "macos")]
-pub mod bulk;
+pub mod macos;
 
 #[cfg(target_os = "linux")]
 pub mod linux;
@@ -527,7 +527,7 @@ pub mod parallel {
 
 /// Walk `root`, yielding the contents of one directory at a time.
 ///
-/// On macOS this uses [`bulk`], which asks the kernel only for the attributes disk usage needs.
+/// On macOS this uses [`macos`], which asks the kernel only for the attributes disk usage needs.
 /// On Linux it uses [`linux`], which owns its own thread pool because `dua-core`'s stops scaling
 /// well before the kernel does. On Windows it uses [`windows`], which reads a directory's sizes
 /// in bulk rather than opening every file. Elsewhere it groups the `dua-core` walk, which reports a
@@ -535,7 +535,7 @@ pub mod parallel {
 pub fn scan_directories(root: &Path, options: ScanOptions) -> impl Iterator<Item = DirEntries> {
     #[cfg(target_os = "macos")]
     {
-        bulk::walk_bulk(
+        macos::walk_macos(
             root,
             thread_count(options),
             options.show_apparent_size,

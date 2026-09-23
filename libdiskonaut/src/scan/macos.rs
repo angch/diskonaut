@@ -30,13 +30,13 @@ use crate::scan::{DirEntries, EntryMeta};
 /// keeps names owned here and packs them where a `DirEntries` is built, which costs one copy per
 /// entry on macOS and leaves the Linux walker's allocation-free path intact.
 #[derive(Debug)]
-pub struct BulkEntry {
+pub struct MacosEntry {
     pub name: OsString,
     pub meta: EntryMeta,
 }
 
 /// Collect owned entries into the packed form the rest of the scan expects.
-fn packed(path: &Path, entries: Vec<BulkEntry>, failed: u64) -> DirEntries {
+fn packed(path: &Path, entries: Vec<MacosEntry>, failed: u64) -> DirEntries {
     let name_bytes = entries.iter().map(|entry| entry.name.len()).sum();
     let mut directory = DirEntries::with_capacity(Arc::from(path), entries.len(), name_bytes);
     for entry in entries {
@@ -190,7 +190,7 @@ fn record_common_attributes(record: &[u8]) -> Option<libc::attrgroup_t> {
 
 /// A decoded record: the entry itself, plus what the listing said about where it leads.
 struct ParsedRecord {
-    entry: BulkEntry,
+    entry: MacosEntry,
     firmlink: bool,
     inode: u64,
 }
@@ -247,7 +247,7 @@ fn parse_record(record: &[u8], size_attribute: libc::attrgroup_t) -> Option<Pars
     }
 
     Some(ParsedRecord {
-        entry: BulkEntry {
+        entry: MacosEntry {
             name: OsString::from_vec(name.to_vec()),
             meta: EntryMeta {
                 size,
@@ -402,7 +402,7 @@ fn read_dir_stat(path: &Path, apparent_size: bool, inode: u64, device: u64) -> i
         } else {
             crate::os::size_on_disk_fast(&metadata)
         };
-        entries.push(BulkEntry {
+        entries.push(MacosEntry {
             name: entry.file_name(),
             meta: EntryMeta {
                 size: if metadata.is_dir() { 0 } else { size },
@@ -512,7 +512,7 @@ impl Queue {
 /// twice. Firmlinks are followed, since they are the only route to what they point at.
 ///
 /// The iterator ends when the whole tree has been read. Dropping it early stops the workers.
-pub fn walk_bulk(
+pub fn walk_macos(
     root: &Path,
     threads: usize,
     apparent_size: bool,
@@ -546,7 +546,7 @@ pub fn walk_bulk(
             let queue = Arc::clone(&queue);
             let sender = sender.clone();
             thread::Builder::new()
-                .name("bulk_scanner".to_string())
+                .name("macos_scanner".to_string())
                 .spawn(move || {
                     let mut buffer = AlignedBuffer([0; BUFFER_BYTES]);
                     let mut size = SizeAttribute::new(apparent_size);
@@ -611,20 +611,20 @@ pub fn walk_bulk(
         .collect();
     drop(sender);
 
-    BulkWalk {
+    MacosWalk {
         receiver,
         workers: Some(workers),
         queue,
     }
 }
 
-struct BulkWalk {
+struct MacosWalk {
     receiver: Receiver<DirEntries>,
     workers: Option<Vec<thread::JoinHandle<()>>>,
     queue: Arc<Queue>,
 }
 
-impl Iterator for BulkWalk {
+impl Iterator for MacosWalk {
     type Item = DirEntries;
     fn next(&mut self) -> Option<DirEntries> {
         match self.receiver.recv() {
@@ -637,7 +637,7 @@ impl Iterator for BulkWalk {
     }
 }
 
-impl BulkWalk {
+impl MacosWalk {
     fn join(&mut self) {
         for worker in self.workers.take().into_iter().flatten() {
             let _ = worker.join();
@@ -645,7 +645,7 @@ impl BulkWalk {
     }
 }
 
-impl Drop for BulkWalk {
+impl Drop for MacosWalk {
     fn drop(&mut self) {
         self.queue.request_stop();
         // Draining releases any worker blocked sending into a full channel, so it can reach the
@@ -657,7 +657,7 @@ impl Drop for BulkWalk {
 
 #[cfg(test)]
 mod tests {
-    use super::{SizeAttribute, walk_bulk};
+    use super::{SizeAttribute, walk_macos};
     use ::std::os::fd::AsRawFd;
     use ::std::path::{Path, PathBuf};
     use ::std::process::Command;
@@ -804,7 +804,7 @@ mod tests {
         ::std::fs::create_dir(mount.join("nested")).expect("create nested");
         ::std::fs::write(mount.join("nested/b.bin"), vec![0u8; 24 * 1024]).expect("write b.bin");
 
-        let total: u64 = walk_bulk(&mount, 2, false, None, false)
+        let total: u64 = walk_macos(&mount, 2, false, None, false)
             .flat_map(|directory| {
                 directory
                     .entries()
