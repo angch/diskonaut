@@ -94,6 +94,25 @@ fn title_labels_the_size_mode() {
     );
 }
 
+/// Once the scan is done the title reports how long it took; while scanning it does not.
+#[test]
+fn title_shows_scan_time_when_complete() {
+    let path = ::std::path::PathBuf::from("C:\\");
+    let done = super::TitleLine::new(scanned(&path), scanned(&path), 0)
+        .scan_duration(Some(::std::time::Duration::from_millis(1350)));
+    assert!(
+        title_text(done, 160).contains("scanned in 1.4s"),
+        "a completed scan shows its elapsed time"
+    );
+    let scanning = super::TitleLine::new(scanned(&path), scanned(&path), 0)
+        .scan_duration(Some(::std::time::Duration::from_millis(1350)))
+        .show_loading();
+    assert!(
+        !title_text(scanning, 160).contains("scanned in"),
+        "while still scanning, no elapsed time is shown"
+    );
+}
+
 /// While scanning, most of the volume has simply not been reached yet.
 #[test]
 fn title_hides_space_outside_the_scan_while_scanning() {

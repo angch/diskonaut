@@ -3,6 +3,7 @@ use ::std::fs;
 use ::std::mem::ManuallyDrop;
 use ::std::path::PathBuf;
 use ::std::sync::mpsc::{Receiver, SyncSender};
+use ::std::time::{Duration, Instant};
 
 use ::std::sync::Arc;
 
@@ -45,6 +46,10 @@ where
     /// Sizes are shown as the logical length rather than on-disk usage. Passed to the title so the
     /// reader knows which they see; the scan itself decides the figures.
     show_apparent_size: bool,
+    /// When the app was created — a stand-in for the scan's start, which begins moments later — and
+    /// how long the scan took once it completed. The title shows the elapsed time when done.
+    scan_start: Instant,
+    scan_duration: Option<Duration>,
 }
 
 impl<B> App<B>
@@ -75,6 +80,8 @@ where
             ui_effects,
             keybinds,
             show_apparent_size,
+            scan_start: Instant::now(),
+            scan_duration: None,
         }
     }
     pub fn start(&mut self, receiver: Receiver<Instruction>) {
@@ -100,7 +107,10 @@ where
             &self.ui_mode,
             &self.ui_effects,
             &self.keybinds,
-            self.show_apparent_size,
+            crate::ui::TitleStatus {
+                apparent_size: self.show_apparent_size,
+                scan_duration: self.scan_duration,
+            },
         );
     }
     pub fn flash_space_freed(&mut self) {
@@ -141,6 +151,7 @@ where
         // the same reason the field is `ManuallyDrop` at all: nobody is waiting for its memory
         // back, and dropping a tree is a recursive walk of every folder in it.
         let _outline = std::mem::replace(&mut self.file_tree, ManuallyDrop::new(tree));
+        self.scan_duration = Some(self.scan_start.elapsed());
     }
     pub fn reset_ui_mode(&mut self) {
         match self.ui_mode {

@@ -3,12 +3,23 @@ use ::ratatui::layout::Rect;
 use ::ratatui::style::{Color, Modifier, Style};
 use ::ratatui::widgets::Widget;
 use ::std::path::PathBuf;
+use ::std::time::Duration;
 
 use crate::ui::FolderInfo;
 use crate::ui::title::{CellSizeOpt, TitleTelescope};
 use libdiskonaut::format::DisplaySize;
 
 use libdiskonaut::os::is_user_admin;
+
+/// Render a scan duration compactly: milliseconds below a second, then seconds to one decimal.
+fn format_scan_time(elapsed: Duration) -> String {
+    let secs = elapsed.as_secs_f64();
+    if secs < 1.0 {
+        format!("{}ms", elapsed.as_millis())
+    } else {
+        format!("{secs:.1}s")
+    }
+}
 
 pub struct TitleLine<'a> {
     base_path_info: FolderInfo<'a>,
@@ -24,6 +35,9 @@ pub struct TitleLine<'a> {
     /// Whether the sizes shown are logical (`-a`) rather than the on-disk usage the tool reports
     /// by default. Only changes the label, so the reader knows which they are looking at.
     apparent_size: bool,
+    /// How long the scan took, once it finished. `None` while still scanning; shown in the title
+    /// when the scan is complete.
+    scan_duration: Option<Duration>,
 }
 
 impl<'a> TitleLine<'a> {
@@ -44,10 +58,15 @@ impl<'a> TitleLine<'a> {
             path_error: false,
             zoom_level: None,
             apparent_size: false,
+            scan_duration: None,
         }
     }
     pub fn apparent_size(mut self, apparent_size: bool) -> Self {
         self.apparent_size = apparent_size;
+        self
+    }
+    pub fn scan_duration(mut self, scan_duration: Option<Duration>) -> Self {
+        self.scan_duration = scan_duration;
         self
     }
     pub fn show_loading(mut self) -> Self {
@@ -149,6 +168,13 @@ impl<'a> Widget for TitleLine<'a> {
                 CellSizeOpt::new(format!("{}", total_size)),
             ]);
         };
+        if let (false, Some(elapsed)) = (self.show_loading, self.scan_duration) {
+            let scanned = format_scan_time(elapsed);
+            title_telescope.append_to_left_side(vec![
+                CellSizeOpt::new(format!(", scanned in {scanned}")),
+                CellSizeOpt::new(format!(" ({scanned})")),
+            ]);
+        }
         if let (false, Some(outside)) = (self.show_loading, self.outside_scan) {
             let used = DisplaySize((self.base_path_info.size + self.space_freed + outside) as f64);
             let outside = DisplaySize(outside as f64);

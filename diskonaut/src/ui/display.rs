@@ -2,6 +2,7 @@ use ::ratatui::Terminal;
 use ::ratatui::backend::Backend;
 use ::ratatui::layout::{Constraint, Direction, Layout, Rect};
 use ::std::path::PathBuf;
+use ::std::time::Duration;
 
 use libdiskonaut::FileTree;
 use libdiskonaut::tiles::{Area, Board};
@@ -18,6 +19,13 @@ pub struct FolderInfo<'a> {
     pub path: &'a PathBuf,
     pub size: u128,
     pub num_descendants: u64,
+}
+
+/// Title metadata that comes from the app rather than the tree: which size the figures are, and how
+/// long the scan took once it finished.
+pub struct TitleStatus {
+    pub apparent_size: bool,
+    pub scan_duration: Option<Duration>,
 }
 
 pub struct Display<B>
@@ -48,8 +56,12 @@ where
         ui_mode: &UiMode,
         ui_effects: &UiEffects,
         keybinds: &Keybinds,
-        apparent_size: bool,
+        title_status: TitleStatus,
     ) {
+        let TitleStatus {
+            apparent_size,
+            scan_duration,
+        } = title_status;
         self.terminal
             .draw(|f| {
                 let full_screen = f.area();
@@ -104,6 +116,7 @@ where
                                 file_tree.space_freed,
                             )
                             .apparent_size(apparent_size)
+                            .scan_duration(scan_duration)
                             .progress_indicator(ui_effects.loading_progress_indicator)
                             .path_error(ui_effects.current_path_is_red)
                             .read_errors(file_tree.failed_to_read)
@@ -139,6 +152,7 @@ where
                                 file_tree.space_freed,
                             )
                             .apparent_size(apparent_size)
+                            .scan_duration(scan_duration)
                             .path_error(ui_effects.current_path_is_red)
                             .flash_space(ui_effects.flash_space_freed)
                             .zoom_level(board.zoom_level)
@@ -174,6 +188,7 @@ where
                                 file_tree.space_freed,
                             )
                             .apparent_size(apparent_size)
+                            .scan_duration(scan_duration)
                             .path_error(ui_effects.current_path_is_red)
                             .zoom_level(board.zoom_level)
                             .read_errors(file_tree.failed_to_read)
@@ -209,6 +224,7 @@ where
                                 file_tree.space_freed,
                             )
                             .apparent_size(apparent_size)
+                            .scan_duration(scan_duration)
                             .path_error(ui_effects.current_path_is_red)
                             .flash_space(ui_effects.flash_space_freed)
                             .zoom_level(board.zoom_level)
@@ -244,6 +260,7 @@ where
                                     file_tree.space_freed,
                                 )
                                 .apparent_size(apparent_size)
+                                .scan_duration(scan_duration)
                                 .path_error(ui_effects.current_path_is_red)
                                 .flash_space(ui_effects.flash_space_freed)
                                 .zoom_level(board.zoom_level)
@@ -268,6 +285,7 @@ where
                                     file_tree.space_freed,
                                 )
                                 .apparent_size(apparent_size)
+                                .scan_duration(scan_duration)
                                 .progress_indicator(ui_effects.loading_progress_indicator)
                                 .path_error(ui_effects.current_path_is_red)
                                 .zoom_level(board.zoom_level)
@@ -306,6 +324,7 @@ where
                                 file_tree.space_freed,
                             )
                             .apparent_size(apparent_size)
+                            .scan_duration(scan_duration)
                             .progress_indicator(ui_effects.loading_progress_indicator)
                             .path_error(ui_effects.current_path_is_red)
                             .read_errors(file_tree.failed_to_read)
