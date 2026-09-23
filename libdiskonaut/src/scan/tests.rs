@@ -959,6 +959,177 @@ fn windows_threshold_skips_smaller_files() {
     let _ = std::fs::remove_dir_all(&root);
 }
 
+/// Scan `root` twice — once for on-disk size (the default), once for the logical length — and
+/// return `(on_disk, apparent, logical_length_of `path`)`. The tree's own root is canonical, so
+/// `path` is looked up only for its length.
+#[cfg(any(windows, target_os = "linux"))]
+fn on_disk_and_apparent(
+    root: &std::path::Path,
+    path: &std::path::Path,
+) -> (u128, u128, u128) {
+    let logical = u128::from(std::fs::metadata(path).expect("stat the test file").len());
+    let (on_disk, _) = scan_into_tree(root, ScanOptions::default());
+    let (apparent, _) = scan_into_tree(
+        root,
+        ScanOptions {
+            show_apparent_size: true,
+            ..ScanOptions::default()
+        },
+    );
+    (on_disk.get_total_size(), apparent.get_total_size(), logical)
+}
+
+/// A sparse file is charged its allocated blocks, not its length: `set_len` grows the file to 16
+/// MiB of hole with four bytes at the tail, and the default (on-disk) scan must see only the
+/// handful of blocks behind it while `-a` still reports the full length.
+#[cfg(target_os = "linux")]
+#[test]
+fn linux_sparse_file_is_sized_by_its_blocks() {
+    use std::io::{Seek, SeekFrom};
+    let root = temp_scan_dir("linux_sparse");
+    let path = root.join("sparse.bin");
+    let mut file = File::create(&path).expect("create sparse file");
+    file.set_len(16 * 1024 * 1024).expect("grow to a hole");
+    file.seek(SeekFrom::End(-4)).expect("seek to tail");
+    file.write_all(&[1, 2, 3, 4]).expect("write the tail");
+    file.sync_all().expect("flush");
+    drop(file);
+
+    let (on_disk, apparent, logical) = on_disk_and_apparent(&root, &path);
+    let _ = std::fs::remove_dir_all(&root);
+
+    assert_eq!(apparent, logical, "apparent size is the logical length");
+    assert!(
+        on_disk < logical / 2,
+        "on-disk {on_disk} should be far below the {logical}-byte length of a sparse file"
+    );
+}
+
+/// FSCTL controls used only by the Windows disk-size tests: mark a file compressed or sparse in
+/// place, so the filesystem stores less than the logical length behind it.
+#[cfg(windows)]
+mod disk_size_fsctl {
+    use ::core::ffi::c_void;
+    use ::std::fs::File;
+    use ::std::os::windows::io::AsRawHandle;
+
+    const FSCTL_SET_COMPRESSION: u32 = 0x0009_C040;
+    const FSCTL_SET_SPARSE: u32 = 0x0009_00C4;
+    const COMPRESSION_FORMAT_DEFAULT: u16 = 1;
+
+    // Pointer types match the crate's other `DeviceIoControl` declaration (`os::windows`) so the
+    // two do not clash as extern declarations of the same symbol.
+    #[link(name = "kernel32")]
+    unsafe extern "system" {
+        fn DeviceIoControl(
+            handle: *mut c_void,
+            control_code: u32,
+            in_buffer: *const u8,
+            in_size: u32,
+            out_buffer: *mut u8,
+            out_size: u32,
+            bytes_returned: *mut u32,
+            overlapped: *mut u8,
+        ) -> i32;
+    }
+
+    fn control(file: &File, code: u32, input: &[u8]) {
+        let mut returned = 0u32;
+        // SAFETY: `file` is open for writing for the duration of the call, `input` outlives it,
+        // and no output buffer is requested, so the null output pointer with size zero is correct.
+        let ok = unsafe {
+            DeviceIoControl(
+                file.as_raw_handle(),
+                code,
+                input.as_ptr(),
+                input.len() as u32,
+                ::core::ptr::null_mut(),
+                0,
+                &mut returned,
+                ::core::ptr::null_mut(),
+            )
+        };
+        assert_ne!(ok, 0, "DeviceIoControl {code:#010x} failed");
+    }
+
+    pub fn set_compressed(file: &File) {
+        control(
+            file,
+            FSCTL_SET_COMPRESSION,
+            &COMPRESSION_FORMAT_DEFAULT.to_le_bytes(),
+        );
+    }
+
+    pub fn set_sparse(file: &File) {
+        control(file, FSCTL_SET_SPARSE, &[]);
+    }
+}
+
+/// NTFS compression: the default scan reports the compressed size on disk, well under the logical
+/// length, while `-a` reports the length. Confirmed against `GetCompressedFileSize` in the API
+/// probe that motivated this — `AllocationSize`, which the walker reads, already equals it.
+#[cfg(windows)]
+#[test]
+fn windows_compressed_file_is_sized_by_its_allocation() {
+    use std::fs::OpenOptions;
+    let root = temp_scan_dir("windows_compressed");
+    let path = root.join("compressible.bin");
+    let file = OpenOptions::new()
+        .create(true)
+        .read(true)
+        .write(true)
+        .truncate(true)
+        .open(&path)
+        .expect("create file");
+    disk_size_fsctl::set_compressed(&file);
+    // Half a MiB of one repeating pattern compresses to a small fraction of its length.
+    let block = b"ABCDEFGH".repeat(64 * 1024);
+    (&file).write_all(&block).expect("write compressible data");
+    file.sync_all().expect("flush");
+    drop(file);
+
+    let (on_disk, apparent, logical) = on_disk_and_apparent(&root, &path);
+    let _ = std::fs::remove_dir_all(&root);
+
+    assert_eq!(apparent, logical, "apparent size is the logical length");
+    assert!(
+        on_disk < apparent / 2,
+        "on-disk {on_disk} should be well under the {apparent}-byte logical size of compressed data"
+    );
+}
+
+/// A sparse file on NTFS is charged its allocated clusters, not its 16 MiB length.
+#[cfg(windows)]
+#[test]
+fn windows_sparse_file_is_sized_by_its_allocation() {
+    use std::fs::OpenOptions;
+    use std::io::{Seek, SeekFrom};
+    let root = temp_scan_dir("windows_sparse");
+    let path = root.join("sparse.bin");
+    let mut file = OpenOptions::new()
+        .create(true)
+        .read(true)
+        .write(true)
+        .truncate(true)
+        .open(&path)
+        .expect("create file");
+    disk_size_fsctl::set_sparse(&file);
+    file.set_len(16 * 1024 * 1024).expect("grow to a hole");
+    file.seek(SeekFrom::End(-4)).expect("seek to tail");
+    file.write_all(&[1, 2, 3, 4]).expect("write the tail");
+    file.sync_all().expect("flush");
+    drop(file);
+
+    let (on_disk, apparent, logical) = on_disk_and_apparent(&root, &path);
+    let _ = std::fs::remove_dir_all(&root);
+
+    assert_eq!(apparent, logical, "apparent size is the logical length");
+    assert!(
+        on_disk < 256 * 1024,
+        "on-disk {on_disk} should be a handful of clusters, not the 16 MiB length"
+    );
+}
+
 /// A folder's scan is not set against its volume's usage, and a tree told its volume's usage
 /// reports the difference, which deleting a file does not change.
 #[test]
