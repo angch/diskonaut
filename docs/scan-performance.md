@@ -45,7 +45,7 @@ not the individual seconds.
 ```sh
 cargo build --release
 ./target/release/diskonaut --benchmark /                       # all stages
-./target/release/diskonaut --benchmark --bench-stage pipeline / # just the app's real path
+./target/release/diskonaut --benchmark --bench-stage sharded /  # just the app's real path
 ./target/release/diskonaut --benchmark --max-depth 4 /          # partial scan, fast iteration
 ./target/release/diskonaut --benchmark --threads 6 --bench-repeat 3 /
 ```
@@ -59,10 +59,13 @@ The stages nest, so subtracting one from the next attributes cost to a layer:
 | `walk` | the walk diskonaut uses now, alone |
 | `tree` | that walk feeding the folder tree |
 | `tree-only` | the folder tree alone — entries are collected first, untimed, then fed to the model |
-| `pipeline` | scan and tree build on separate threads, as the app runs them |
+| `pipeline` | scan and one tree builder on separate threads, over a channel |
+| `sharded` | scan feeding several tree builders, merged and replayed — the app's real path |
 
 `dua-*` against the others is a like-for-like walker comparison on the same tree. `walk` against
-`tree` is the cost of the data model. `tree` against `pipeline` is the cost of the channel.
+`tree` is the cost of the data model. `tree` against `pipeline` is the cost of the channel, and
+`pipeline` against `sharded` the cost of parallelising the build — which is a saving where the build
+is the bottleneck (Linux, macOS) and a small loss where the walk is (Windows, one shard).
 `tree-only` is the model's cost with the walk taken out of the measurement entirely — use it rather
 than the `walk`/`tree` subtraction, which on Linux conflates the model with the walk stalling
 behind a busy consumer.
@@ -1345,9 +1348,11 @@ The other three, more briefly:
   real pipeline never sees, and the timed build then runs in it. The conclusion it was used for
   still holds (walk 0.49s, pipeline 0.72s), but the number itself should not be quoted as the
   model's cost without that caveat.
-- **`dua-core` is still a dependency.** It backs the `dua-*` benchmark stages, which are how the
-  comparison above is reproduced, and `fallback::group_by_directory` for platforms that are neither
-  macOS nor Linux. Dropping it would mean giving up the baseline.
+- **`dua-core` is still a dependency** (bumped 3 → 4.1.0; the `walk` API and the comparison are
+  unchanged — 4.x only wraps `Entry::metadata` in an `Option` for its new `skip_metadata`). It backs
+  the `dua-*` benchmark stages, which are how the comparison above is reproduced, and
+  `fallback::group_by_directory` for platforms that are neither macOS nor Linux. Dropping it would
+  mean giving up the baseline.
 - **The reflink threshold is a guess, not a measurement.** 64 KiB was chosen because it leaves 3.8%
   of files to probe on this volume. Nobody has measured how many shared bytes live below it.
 - **A scan of `/` double-counts filesystems mounted in two places**, as above. `-x` avoids it.
@@ -1960,7 +1965,10 @@ still indivisible and now hash into fewer, larger lumps. D=5 is the knee, and th
 | D=5, K=8 | 0.450s | 0.002s | 0.467s |
 
 The whole D∈{4,5,6} × K∈{4,6,8} grid lands within 0.437–0.480s, so the choice is not fragile.
-`parallel::SHARDS = 4` and `SHARD_DEPTH = 5` are the constants, with this table as their reason.
+`SHARD_DEPTH = 5` and `SHARDS = 4` are the constants here, with this table as their reason — on
+Linux and macOS, where the fast walker makes the build the bottleneck. Windows is walk-bound and
+uses one shard instead, which needs no merge or replay at all; see "The shard count, and why
+Windows uses one" below.
 
 ### The live view
 
