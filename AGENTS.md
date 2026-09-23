@@ -5,7 +5,7 @@
 **Diskonaut** is an interactive terminal disk space navigator (TUI) written in Rust. It visualizes
 disk usage via a squarify treemap, supports live scanning, and allows deleting large files in-place.
 
-**Workspace layout** (Rust 2024 edition, version 0.13.0):
+**Workspace layout** (Rust 2024 edition, version 0.1.0; the `diskonaut-angch` fork — see README):
 ```
 diskonaut/
 ├── libdiskonaut/     # Core library: model, scan, treemap, formatting, os

@@ -1,12 +1,15 @@
 [package]
-name = "diskonaut"
+name = "diskonaut-angch"
 version.workspace = true
 edition.workspace = true
 license.workspace = true
+authors.workspace = true
 repository.workspace = true
 homepage.workspace = true
 description.workspace = true
 
+# The package is renamed for the fork, but the binary keeps the `diskonaut` name so the command,
+# the docs, and the benchmark recipes are unchanged.
 [[bin]]
 name = "diskonaut"
 path = "src/main.rs"

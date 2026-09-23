@@ -7,6 +7,14 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Changed
+
+- Forked as **`diskonaut-angch`** and restarted versioning at `0.1.0`. This fork diverged
+  substantially from upstream diskonaut `0.13.0` (native per-platform walkers, parallel tree build,
+  Windows support) and now versions independently; `repository` and `homepage` point at the fork.
+  The binary is still named `diskonaut`, so the command and docs are unchanged. Entries below this
+  line predate the rename.
+
 ### Added
 
 - Windows support. A native walker reads a directory's sizes, allocation and file ids in bulk
