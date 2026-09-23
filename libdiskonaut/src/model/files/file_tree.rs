@@ -14,6 +14,9 @@ pub struct FileTree {
     pub current_folder_names: Vec<OsString>,
     pub space_freed: u128,
     pub failed_to_read: u64,
+    /// Bytes in use on the volume the scan covered, when it covered a whole volume in disk-usage
+    /// mode and stayed on it, so that the two are comparable. See [`Self::outside_scan`].
+    pub volume_used: Option<u128>,
     pub path_in_filesystem: PathBuf,
     base_folder: Folder,
     hard_links: HardLinks,
@@ -36,6 +39,7 @@ impl FileTree {
             path_in_filesystem,
             space_freed: 0,
             failed_to_read: 0,
+            volume_used: None,
             hard_links: HardLinks::default(),
             size_at_depth: Vec::new(),
             deferred: None,
@@ -130,6 +134,16 @@ impl FileTree {
     pub fn delete_file(&mut self, file_to_delete: &FileToDelete) {
         let path_to_delete = &file_to_delete.path_to_file;
         self.base_folder.delete_path(path_to_delete);
+    }
+    /// Space in use on the volume that the scan did not find: folders it could not read, and what
+    /// no directory lists — filesystem metadata, shadow copies, snapshots.
+    ///
+    /// `None` unless [`Self::volume_used`] was recorded, and zero when the scan found as much as
+    /// the volume reports. Deleting a file moves its size into `space_freed`, so the figure holds
+    /// still as files are deleted rather than growing by what was freed.
+    pub fn outside_scan(&self) -> Option<u128> {
+        let found = self.get_total_size() + self.space_freed;
+        self.volume_used.map(|used| used.saturating_sub(found))
     }
     /// How many distinct files the scan has seen under more than one name.
     pub fn hard_linked_files(&self) -> usize {

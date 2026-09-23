@@ -541,6 +541,13 @@ pub fn walk_windows(root: &Path, threads: usize, options: ScanOptions) -> Window
     let root: PathBuf = root.canonicalize().unwrap_or_else(|_| root.to_path_buf());
     let root: Arc<Path> = Arc::from(root.as_path());
 
+    // Elevated, this lets the walk into every folder, as WizTree's does; unelevated it is a no-op.
+    // Once per process: the privilege stays on once enabled.
+    static BACKUP_PRIVILEGE: ::std::sync::Once = ::std::sync::Once::new();
+    BACKUP_PRIVILEGE.call_once(|| {
+        crate::os::enable_backup_privilege();
+    });
+
     let (volume, stable_ids) = Handle::open(&root, ffi::FILE_READ_ATTRIBUTES, false)
         .map_or((0, false), |handle| volume_of(&handle));
 

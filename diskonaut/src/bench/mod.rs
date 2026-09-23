@@ -300,6 +300,11 @@ pub fn run(
     shard_depth: usize,
 ) {
     println!("benchmarking {}", path.display());
+    if let Some(used) = libdiskonaut::os::volume_used(path) {
+        // What the stages' totals fall short of is what the walk could not see: unreadable
+        // folders, filesystem metadata, snapshots.
+        println!("  volume used: {} ({used} B)", human_size(u128::from(used)));
+    }
     println!(
         "  threads: {}   apparent-size: {}   max-depth: {}\n",
         thread_count(options),

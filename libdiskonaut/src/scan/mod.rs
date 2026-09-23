@@ -510,6 +510,7 @@ pub mod parallel {
         let merged = Instant::now();
 
         tree.replay_deferred();
+        tree.volume_used = super::comparable_volume_used(&root, options);
         let replayed = Instant::now();
 
         Some((
@@ -889,8 +890,23 @@ pub fn scan_into_tree(root: impl AsRef<Path>, options: ScanOptions) -> (FileTree
         failed_to_read += directory.failed;
         tree.add_dir_entries(directory);
     }
+    tree.volume_used = comparable_volume_used(&root_path, options);
 
     (tree, failed_to_read)
+}
+
+/// The volume's used bytes, when a scan of `root` with `options` is comparable with them.
+///
+/// It is when `root` is a volume's root, sizes are blocks allocated rather than lengths, and the
+/// scan stayed on that volume. Windows never leaves it, since mounted folders are not followed; on
+/// Unix only `-x` promises that, and a scan of `/` that crossed into `/home` would otherwise be
+/// set against the root filesystem's usage alone.
+fn comparable_volume_used(root: &Path, options: ScanOptions) -> Option<u128> {
+    let stays = cfg!(windows) || options.one_file_system;
+    if options.show_apparent_size || !stays {
+        return None;
+    }
+    crate::os::volume_used(root).map(u128::from)
 }
 
 #[cfg(test)]

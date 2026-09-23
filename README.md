@@ -73,6 +73,28 @@ diskonaut --hard-link-threshold 1048576 D:\ # only files of 1 MiB and more
 On one 2M-entry `C:\`, the default found all but 240 MB of 17 GB of double-counted links, for 90 MB
 of memory; tracking every file was exact, for 200 MB and about a second more.
 
+## Why the total can be less than the disk's used space
+
+A scan adds up the files it can reach. The volume's used space, which Explorer and WizTree report,
+also holds what no directory lists: the filesystem's own metadata (NTFS's master file table),
+shadow copies and snapshots, and every folder the scan was refused. So when a scan covers a whole
+volume, the title shows the volume's used space and the part of it the scan did not find:
+
+```
+Total: 315.8G (2058004 files), freed: 0, disk used: 424.4G, 108.6G outside the scan
+```
+
+It appears for a drive root on Windows, and on Unix for a mount point scanned with `-x` (without
+it, the scan may cross into other filesystems and the two stop being comparable). It is not shown
+with `--apparent-size`, since file lengths cannot be set against blocks in use.
+
+On Windows, run diskonaut as administrator to see nearly everything. Elevated, it turns on the
+backup privilege, as WizTree does, which lets it read `System Volume Information`, other users'
+profiles and `WindowsApps` whatever their permissions say. It grants reading only: deleting still
+needs ordinary permission. On one `C:\`, unelevated, 192 folders were unreadable and 108.6 GiB of
+the 424.4 GiB in use was outside the scan. NTFS's metadata files stay outside even then; only
+reading the master file table directly, as WizTree does, counts them.
+
 ## Benchmarking the scan
 
 `--benchmark` scans headlessly and prints timings instead of starting the UI, so scanning strategies

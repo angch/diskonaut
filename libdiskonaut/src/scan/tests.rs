@@ -919,3 +919,38 @@ fn windows_threshold_skips_smaller_files() {
     assert_eq!(tree.hard_linked_files(), 1);
     let _ = std::fs::remove_dir_all(&root);
 }
+
+/// A folder's scan is not set against its volume's usage, and a tree told its volume's usage
+/// reports the difference, which deleting a file does not change.
+#[test]
+fn outside_scan_is_recorded_for_volume_roots_and_holds_across_deletes() {
+    let dir = temp_scan_dir("outside_scan");
+    File::create(dir.join("file"))
+        .expect("create file")
+        .write_all(&[1u8; 8192])
+        .expect("write file");
+    let (mut tree, _) = scan_into_tree(&dir, ScanOptions::default());
+    assert_eq!(tree.volume_used, None, "a temporary folder is not a volume");
+    assert_eq!(tree.outside_scan(), None);
+
+    let total = tree.get_total_size();
+    tree.volume_used = Some(total + 500);
+    assert_eq!(tree.outside_scan(), Some(500));
+    tree.delete_file(&crate::FileToDelete {
+        path_in_filesystem: dir.clone(),
+        path_to_file: vec![std::ffi::OsString::from("file")],
+        file_type: crate::tiles::FileType::File,
+        num_descendants: None,
+        size: total,
+    });
+    tree.space_freed += total;
+    assert_eq!(
+        tree.outside_scan(),
+        Some(500),
+        "freed space is not outside the scan"
+    );
+
+    tree.volume_used = Some(0);
+    assert_eq!(tree.outside_scan(), Some(0), "never negative");
+    let _ = std::fs::remove_dir_all(&dir);
+}

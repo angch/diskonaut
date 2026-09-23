@@ -26,3 +26,26 @@ fn size_on_disk_fast_is_at_least_file_length() {
 
     let _ = std::fs::remove_dir_all(&dir);
 }
+
+/// Only a volume's root is comparable with the volume's usage; a folder inside it is not.
+#[test]
+fn volume_used_is_reported_for_a_volume_root_only() {
+    let dir = std::env::temp_dir()
+        .canonicalize()
+        .expect("canonicalize temp dir");
+    assert_eq!(
+        crate::os::volume_used(&dir),
+        None,
+        "a folder is not a volume"
+    );
+    let root = dir.ancestors().last().expect("a root");
+    let used = crate::os::volume_used(root).expect("the root of the temp dir's volume");
+    assert!(used > 0);
+}
+
+/// Unelevated, the privilege is not held; the call must say so rather than fail.
+#[cfg(windows)]
+#[test]
+fn enabling_the_backup_privilege_does_not_fail() {
+    let _ = crate::os::enable_backup_privilege();
+}

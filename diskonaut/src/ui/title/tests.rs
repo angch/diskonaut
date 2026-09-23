@@ -43,3 +43,53 @@ fn telescope_shows_loading_indicator_when_loading() {
         "loading title should render visible content"
     );
 }
+
+fn title_text(title: super::TitleLine<'_>, width: u16) -> String {
+    use ::ratatui::widgets::Widget;
+    let area = Rect::new(0, 0, width, 1);
+    let mut buf = Buffer::empty(area);
+    title.render(area, &mut buf);
+    (0..width)
+        .filter_map(|x| buf[(x, 0)].symbol().chars().next())
+        .collect()
+}
+
+fn scanned(path: &::std::path::PathBuf) -> crate::ui::FolderInfo<'_> {
+    crate::ui::FolderInfo {
+        path,
+        size: 300 * 1024 * 1024 * 1024,
+        num_descendants: 10,
+    }
+}
+
+/// A whole-volume scan says how much of the volume's used space it did not find, and the disk
+/// used figure is the scan's total plus that.
+#[test]
+fn title_shows_space_outside_the_scan() {
+    let path = ::std::path::PathBuf::from("C:\\");
+    let outside = 100u128 * 1024 * 1024 * 1024;
+    let title =
+        super::TitleLine::new(scanned(&path), scanned(&path), 0).outside_scan(Some(outside));
+    let line = title_text(title, 160);
+    assert!(
+        line.contains("disk used: 400.0G, 100.0G outside the scan"),
+        "{line}"
+    );
+}
+
+/// While scanning, most of the volume has simply not been reached yet.
+#[test]
+fn title_hides_space_outside_the_scan_while_scanning() {
+    let path = ::std::path::PathBuf::from("C:\\");
+    let title = super::TitleLine::new(scanned(&path), scanned(&path), 0)
+        .outside_scan(Some(1 << 30))
+        .show_loading();
+    assert!(!title_text(title, 160).contains("outside"));
+}
+
+#[test]
+fn title_hides_space_outside_the_scan_when_there_is_none() {
+    let path = ::std::path::PathBuf::from("C:\\");
+    let title = super::TitleLine::new(scanned(&path), scanned(&path), 0).outside_scan(Some(0));
+    assert!(!title_text(title, 160).contains("outside"));
+}

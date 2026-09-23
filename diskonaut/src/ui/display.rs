@@ -105,6 +105,7 @@ where
                             .progress_indicator(ui_effects.loading_progress_indicator)
                             .path_error(ui_effects.current_path_is_red)
                             .read_errors(file_tree.failed_to_read)
+                            .outside_scan(file_tree.outside_scan())
                             .zoom_level(board.zoom_level)
                             .show_loading(),
                             chunks[0],
@@ -138,7 +139,8 @@ where
                             .path_error(ui_effects.current_path_is_red)
                             .flash_space(ui_effects.flash_space_freed)
                             .zoom_level(board.zoom_level)
-                            .read_errors(file_tree.failed_to_read),
+                            .read_errors(file_tree.failed_to_read)
+                            .outside_scan(file_tree.outside_scan()),
                             chunks[0],
                         );
                         f.render_widget(
@@ -170,7 +172,8 @@ where
                             )
                             .path_error(ui_effects.current_path_is_red)
                             .zoom_level(board.zoom_level)
-                            .read_errors(file_tree.failed_to_read),
+                            .read_errors(file_tree.failed_to_read)
+                            .outside_scan(file_tree.outside_scan()),
                             chunks[0],
                         );
                         f.render_widget(
@@ -204,7 +207,8 @@ where
                             .path_error(ui_effects.current_path_is_red)
                             .flash_space(ui_effects.flash_space_freed)
                             .zoom_level(board.zoom_level)
-                            .read_errors(file_tree.failed_to_read),
+                            .read_errors(file_tree.failed_to_read)
+                            .outside_scan(file_tree.outside_scan()),
                             chunks[0],
                         );
                         f.render_widget(
@@ -237,7 +241,8 @@ where
                                 .path_error(ui_effects.current_path_is_red)
                                 .flash_space(ui_effects.flash_space_freed)
                                 .zoom_level(board.zoom_level)
-                                .read_errors(file_tree.failed_to_read),
+                                .read_errors(file_tree.failed_to_read)
+                                .outside_scan(file_tree.outside_scan()),
                                 chunks[0],
                             );
                             f.render_widget(
@@ -260,6 +265,7 @@ where
                                 .path_error(ui_effects.current_path_is_red)
                                 .zoom_level(board.zoom_level)
                                 .read_errors(file_tree.failed_to_read)
+                                .outside_scan(file_tree.outside_scan())
                                 .show_loading(),
                                 chunks[0],
                             );
@@ -295,6 +301,7 @@ where
                             .progress_indicator(ui_effects.loading_progress_indicator)
                             .path_error(ui_effects.current_path_is_red)
                             .read_errors(file_tree.failed_to_read)
+                            .outside_scan(file_tree.outside_scan())
                             .show_loading(),
                             chunks[0],
                         );

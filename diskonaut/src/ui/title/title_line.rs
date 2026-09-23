@@ -17,6 +17,7 @@ pub struct TitleLine<'a> {
     show_loading: bool,
     progress_indicator: u64,
     read_errors: Option<u64>,
+    outside_scan: Option<u128>,
     flash_space: bool,
     path_error: bool,
     zoom_level: Option<usize>,
@@ -34,6 +35,7 @@ impl<'a> TitleLine<'a> {
             space_freed,
             progress_indicator: 0,
             read_errors: None,
+            outside_scan: None,
             show_loading: false,
             flash_space: false,
             path_error: false,
@@ -60,6 +62,12 @@ impl<'a> TitleLine<'a> {
         if read_errors > 0 {
             self.read_errors = Some(read_errors);
         }
+        self
+    }
+    /// Space the volume reports in use that the scan did not find. Shown only once the scan is
+    /// done, since until then most of the volume is simply not reached yet.
+    pub fn outside_scan(mut self, outside_scan: Option<u128>) -> Self {
+        self.outside_scan = outside_scan.filter(|&bytes| bytes > 0);
         self
     }
     pub fn zoom_level(mut self, zoom_level: usize) -> Self {
@@ -126,6 +134,16 @@ impl<'a> Widget for TitleLine<'a> {
                 CellSizeOpt::new(format!("{}", total_size)),
             ]);
         };
+        if let (false, Some(outside)) = (self.show_loading, self.outside_scan) {
+            let used = DisplaySize((self.base_path_info.size + self.space_freed + outside) as f64);
+            let outside = DisplaySize(outside as f64);
+            title_telescope.append_to_left_side(vec![
+                CellSizeOpt::new(format!(", disk used: {used}, {outside} outside the scan")),
+                CellSizeOpt::new(format!(" (+{outside} outside the scan)")),
+                CellSizeOpt::new(format!(" (+{outside} unscanned)")),
+                CellSizeOpt::new(format!(" (+{outside})")),
+            ]);
+        }
         if let Some(read_errors) = self.read_errors {
             title_telescope.append_to_left_side(vec![
                 CellSizeOpt::new(format!(" (failed to read {} files)", read_errors))

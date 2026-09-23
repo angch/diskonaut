@@ -2164,12 +2164,41 @@ Windows consoles report a key release as its own event; Unix terminals report pr
 handler acted on both, so `q` opened the quit prompt on the way down and answered it on the way up.
 `TerminalEvents` now drops releases before anything sees them.
 
+### Why `C:\` came to 315 GiB against WizTree's 424 GB
+
+WizTree's 424.4 "GB" is binary: it matches `C:`'s used-space counter, 455,733,346,304 B =
+424.43 GiB, to the byte. That counter covers every allocated cluster, so the gap is space an
+unelevated walk cannot reach, not space counted wrongly. A diagnostic pass, since reverted, compared
+what the directory listings said with what each file said:
+
+- **Stale directory sizes: 0.51 GiB.** NTFS keeps a copy of each file's size in its directory
+  entry and updates it lazily, so files open for writing (logs, SQLite write-ahead logs) can show
+  less than they hold. Across 2M entries the difference came to 2,885 files and 0.51 GiB.
+- **`hiberfil.sys` (15.7 GiB), `pagefile.sys` (4.75 GiB), `swapfile.sys`:** cannot be opened
+  even to query, but their listed sizes are current and already counted.
+- **192 unreadable directories.** Among them `System Volume Information` (shadow copies),
+  `Program Files\WindowsApps`, other users' profiles, parts of `ProgramData\Microsoft`,
+  `Windows\Temp`, `Prefetch`, `Recovery`. None of them can be sized without elevation.
+- **NTFS metadata files** (`$MFT`, `$LogFile`, `$UsnJrnl`, `$Secure`): never listed in any
+  directory, so no walk counts them. Only reading the master file table does.
+- **Hard links** do not explain any of it: the used-space counter counts each cluster once, as the
+  deduplicated total does.
+
+Two changes came of it. Elevated, the walker now enables `SeBackupPrivilege`. An administrator's
+token holds it but disabled, and until it is enabled `FILE_FLAG_BACKUP_SEMANTICS`, which the walker
+already passed, does not bypass ACLs. `System Volume Information` refuses administrators without it.
+And a whole-volume scan now reports the volume's used space and the part of it the scan did not
+find, in the title bar and in the benchmark header, so the gap is on screen rather than something
+to reverse-engineer.
+
 ### Known gaps on Windows
 
 - CI builds and tests on Linux only. The Windows walker has been run on one machine. The Linux and
   macOS builds were checked with `cargo clippy --target` from Windows, not built or run there.
 - Folder mount points are never followed, so a volume mounted in a folder is not scanned even
   without `-x`, unlike on Unix.
+- The elevated path — the backup privilege opening refused folders — is untested: the machine
+  these numbers come from was only ever used unelevated.
 - The id-class fallback is decided once per scan: if one NTFS directory answered
   `FileIdExtdDirectoryInfo` with `ERROR_INVALID_PARAMETER`, the rest of the scan would run without
   ids, and so without hard-link tracking.
