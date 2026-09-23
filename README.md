@@ -92,8 +92,8 @@ On Windows, run diskonaut as administrator to see nearly everything. Elevated, i
 backup privilege, as WizTree does, which lets it read `System Volume Information`, other users'
 profiles and `WindowsApps` whatever their permissions say. It grants reading only: deleting still
 needs ordinary permission. On one `C:\`, unelevated, 192 folders were unreadable and 108.6 GiB of
-the 424.4 GiB in use was outside the scan. NTFS's metadata files stay outside even then; only
-reading the master file table directly, as WizTree does, counts them.
+the 424.4 GiB in use was outside the scan; elevated, none were, and 1.7 GiB was — NTFS's metadata
+files, which only reading the master file table directly, as WizTree does, counts.
 
 ## Benchmarking the scan
 

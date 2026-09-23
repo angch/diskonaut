@@ -2191,14 +2191,23 @@ And a whole-volume scan now reports the volume's used space and the part of it t
 find, in the title bar and in the benchmark header, so the gap is on screen rather than something
 to reverse-engineer.
 
+Run elevated, on the same `C:\` (`--bench-stage sharded`):
+
+| | entries | unreadable | total | volume used | outside the scan | time |
+| --- | ---: | ---: | ---: | ---: | ---: | ---: |
+| unelevated | 2,058,004 | 192 | 315.8 GiB | 424.4 GiB | 108.6 GiB | 8.9s |
+| elevated | 2,456,499 | 0 | 422.9 GiB | 424.6 GiB | 1.7 GiB | 8.8s |
+
+The 1.7 GiB left (0.4%) is what no directory lists: NTFS's metadata files, which only reading the
+master file table counts. The elevated scan is faster than WizTree's 10.72s on the same volume
+while walking 400k more entries than the unelevated one.
+
 ### Known gaps on Windows
 
 - CI builds and tests on Linux only. The Windows walker has been run on one machine. The Linux and
   macOS builds were checked with `cargo clippy --target` from Windows, not built or run there.
 - Folder mount points are never followed, so a volume mounted in a folder is not scanned even
   without `-x`, unlike on Unix.
-- The elevated path — the backup privilege opening refused folders — is untested: the machine
-  these numbers come from was only ever used unelevated.
 - The id-class fallback is decided once per scan: if one NTFS directory answered
   `FileIdExtdDirectoryInfo` with `ERROR_INVALID_PARAMETER`, the rest of the scan would run without
   ids, and so without hard-link tracking.
