@@ -2065,6 +2065,119 @@ Four consequences to know about rather than fix:
   surfaces from `hd_scanner` rather than `main`.
 
 
+## Windows: a native walker, and hard links by file id (2026-09-23)
+
+The first Windows build ran the `dua-core` walk, and a 609k-entry `D:\` took 34s. WizTree does it
+in 1.3s by reading the NTFS master file table, which needs administrator rights. This section is
+about getting close to that without them.
+
+### Test machine
+
+Windows 11 25H2 (build 26200), 12 logical cores, NTFS. `D:\`: 609k entries, 1.6 TiB, no hard links.
+`C:\`: 2.06M entries, 314 GiB, with 155k hard-linked files. Warm cache throughout. WizTree's
+figures, for comparison: 1.3s for `D:\`, 10.72s for `C:\`.
+
+### Results
+
+All times are `--bench-stage sharded`, the app's path.
+
+| | `D:\` | `C:\` | `C:\` total vs exact | `C:\` peak memory |
+| --- | ---: | ---: | ---: | ---: |
+| `dua-core` walk, link count per file | 40.0s | — | — | — |
+| native walker, link count probed ≥ 64 KiB | 2.8s | — | — | — |
+| native walker, no hard-link handling | 0.42s | 7.6s | +17.5 GB | 282 MB |
+| native walker, hot spots tracked by id (default) | 0.42s | 7.9s | ≈ +240 MB | 396 MB |
+| native walker, every file tracked by id | 0.53s | 8.2s | exact | 508 MB |
+
+`sharded` and `pipeline` agree to the byte on `D:\`. On `C:\` they differ by a few KB between runs,
+as do two runs of the same stage: something is always writing to the system volume.
+
+### What the walker does
+
+`scan/windows.rs` has the Linux walker's thread model: one queue behind a mutex, work stealing,
+batches to the consumer. Each directory is one `CreateFileW` and a few calls to
+`GetFileInformationByHandleEx(FileIdExtdDirectoryInfo)`. Each call fills a 64 KiB buffer with
+entries carrying end-of-file, allocation size, attributes, reparse tag and 128-bit file id. The
+`dua-core` walk went through `std::fs::DirEntry::metadata`, which has neither allocation size nor
+file id, so both cost opening the file.
+
+Filesystems that do not answer the id class (FAT, exFAT, some network shares) fall back to
+`FileFullDirectoryInfo`, with no ids. Junctions, symbolic links and folder mount points (reparse
+tags `MOUNT_POINT` and `SYMLINK`) are not followed. Every other reparse point is descended into,
+because OneDrive placeholders and dedup files are real data carrying a tag.
+
+Eight workers is the cap, as before: on `D:\`, 4 took 3.9s, 8 took 2.8s, 16 took 4.0s and 24 took
+4.2s (timed while link probing was still on).
+
+### Hard links: what did not work
+
+No Windows directory listing carries a link count. The first version asked for it the only way
+Windows offers, by opening the file (`FILE_STANDARD_INFO.NumberOfLinks`), for NTFS files of 64 KiB
+and more. On `D:\` that was 200k files and 2.4s of the 2.8s scan: about 100µs of thread time per
+file. Opening a file is expensive on Windows, probably because antivirus filter drivers sit on
+that path.
+
+`GetFileInformationByName` (Windows 11 24H2) returns the link count from a path without opening
+a handle, and measured no faster (2.96–3.08s against 2.72–2.85s). It was removed.
+
+Probing only in known locations helped but did not get under WizTree. On `C:\`, probing every
+non-empty file there took 19.1s; files over 4 KiB, 11.4s; files of 64 KiB and more, 8.9s at 1 GB
+over.
+
+### Hard links: what did
+
+The ledger (`model/files/hard_links.rs`) charges a file's first name along its whole path, exactly
+as it charges an ordinary file, and only a later name with the same identity is reduced. So a
+file sent as "may be shared" that turns out to have one name gets exactly the sizes it would have
+had anyway. The link count is not needed: the file id the listing already returns is enough.
+`EntryMeta::links = LINKS_UNKNOWN` (`u64::MAX`) marks such files, and it already satisfies the
+`links > 1` test the model uses, so the model's charging did not change.
+
+The price is one ledger entry per tracked file (about 100 bytes) and a longer single-threaded
+replay after the parallel build: 0.24–0.32s on `C:\` for 542k tracked files. That replay is why
+`sharded` is about 0.3s behind `pipeline` on Windows, where the walk is the floor and one builder
+keeps up with it.
+
+Only NTFS and ReFS volumes are tracked. A third-party filesystem driver that reported one id for
+every file would otherwise have its equal-sized files merged, which is an undercount.
+
+`LinkedFile` gained a `linked` flag, so the hard-linked count only includes files seen under a
+second name. Without it, every tracked file would be reported as hard-linked.
+
+### Where the hot spots came from
+
+The default tracks files only in `%SystemRoot%`, below directories named `node_modules`,
+`.pnpm-store`, `pnpm`, `uv`, `.venv` and `site-packages`, and in a few fixed installation paths.
+The list came from measurement, not guesswork: every file on `C:\` was asked for its link count and
+each hard-linked path was logged. Of the 155,547 hard-linked files (28.5 GiB), `%SystemRoot%` plus
+the directory names covered 146,593 (21.9 GiB). Most of the rest was Microsoft software linking
+between its own versions: Edge, WebView2 and Copilot each link into `EdgeCore` under
+`Program Files (x86)\Microsoft` (4.7 GiB). Docker's CLI plugins (1.3 GiB), Git's `git-core`,
+Reference Assemblies and Defender's definitions made up most of what was left. Those are matched
+as whole paths, since `Microsoft` as a name would take in all of `AppData`. After that, about
+240 MB of links on that machine go untracked: Cargo `target` directories, `AppData\Local\Packages`,
+the Dart pub cache. Tracking those would cost more memory than they are worth.
+
+### The key-release bug
+
+Windows consoles report a key release as its own event; Unix terminals report presses only. Every
+handler acted on both, so `q` opened the quit prompt on the way down and answered it on the way up.
+`TerminalEvents` now drops releases before anything sees them.
+
+### Known gaps on Windows
+
+- CI builds and tests on Linux only. The Windows walker has been run on one machine. The Linux and
+  macOS builds were checked with `cargo clippy --target` from Windows, not built or run there.
+- Folder mount points are never followed, so a volume mounted in a folder is not scanned even
+  without `-x`, unlike on Unix.
+- The id-class fallback is decided once per scan: if one NTFS directory answered
+  `FileIdExtdDirectoryInfo` with `ERROR_INVALID_PARAMETER`, the rest of the scan would run without
+  ids, and so without hard-link tracking.
+- ReFS 128-bit ids are folded into 64 bits by xor and rotation. That is a bijection on NTFS, where
+  the high half is zero, and collision-free on ReFS while the low half stays under 2^32.
+- The `dua-*` benchmark stages on Windows still open every file for its link count, so they
+  overstate what `dua-core` itself costs there.
+
 ## Known gaps
 
 > The two Linux sections above that end "the model is the bottleneck" are superseded: the model is

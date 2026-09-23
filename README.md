@@ -48,6 +48,31 @@ on, because those files are already being counted by another path. On macOS that
 `/System/Volumes/Data`, which is both a mount point and grafted into `/` through firmlinks — follow
 both and almost every file on the machine is counted twice.
 
+On Windows the scan never follows a junction, a symbolic link or a volume mounted in a folder, so
+it stays on the volume it started on with or without `-x`. OneDrive placeholders and other
+reparse points that stand for real files are scanned as usual.
+
+## Hard links on Windows
+
+A file with several names (a hard link) is counted once per folder, however many of its names that
+folder holds. Linux and macOS report each file's link count for free; Windows directory listings do
+not, and asking costs a file open per file. So on Windows diskonaut tracks files by their NTFS/ReFS
+file id instead, which costs memory rather than time — about 100 bytes a file.
+
+By default only the places hard links are normally made are tracked: the Windows directory, Edge,
+Docker and Git installs, and package stores (`node_modules`, pnpm, uv, `.venv`, `site-packages`).
+A link made by hand elsewhere is counted once per name, which overstates rather than understates.
+To track everywhere, pass `--hard-link-threshold BYTES` — every file at least that large is
+tracked, wherever it is:
+
+```sh
+diskonaut --hard-link-threshold 1 C:\       # exact: every non-empty file
+diskonaut --hard-link-threshold 1048576 D:\ # only files of 1 MiB and more
+```
+
+On one 2M-entry `C:\`, the default found all but 240 MB of 17 GB of double-counted links, for 90 MB
+of memory; tracking every file was exact, for 200 MB and about a second more.
+
 ## Benchmarking the scan
 
 `--benchmark` scans headlessly and prints timings instead of starting the UI, so scanning strategies

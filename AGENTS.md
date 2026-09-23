@@ -64,13 +64,17 @@ builders that share nothing:
 - `scan/bulk.rs` — macOS walker on `getattrlistbulk(2)` (see `docs/scan-performance.md`)
 - `scan/linux.rs` — Linux walker on `getdents64`/`statx`, own thread pool; also the `FS_IOC_FIEMAP`
   reflink probe. `dua-core` is only the fallback for other platforms and the benchmark baseline
+- `scan/windows.rs` — Windows walker: one handle per directory, entries read in bulk with
+  `GetFileInformationByHandleEx(FileIdExtdDirectoryInfo)`. No listing carries a link count, so
+  files in hard-link hot spots (or all files ≥ `--hard-link-threshold`) are sent with
+  `LINKS_UNKNOWN` and the ledger dedupes them by file id — memory instead of a file open each
 - `model/files/hard_links.rs` — charges shared blocks to each folder once, over interned directory
   ids; two ledgers, one keyed on inode (hard links) and one on physical extent (reflinks)
 - `model/files/hash.rs` — the fast hasher behind the folder and inode maps
 - `tiles/treemap.rs` — squarify algorithm (`HEIGHT_WIDTH_RATIO = 2.5`)
 - `tiles/board.rs` — `Board`: tile selection, zoom stack, navigation
 - `format/display_size.rs` — byte → human-readable (B/KB/MB/GB/TB)
-- `os/unix.rs` — `is_user_admin()`, `size_on_disk_fast()`
+- `os/unix.rs`, `os/windows.rs` — `is_user_admin()`, `size_on_disk_fast()`, `volume_id()`, `link_count()`
 
 **`diskonaut`** — TUI application:
 - `main.rs` — entry point, thread spawning, channel setup
@@ -148,7 +152,9 @@ Exiting { app_loaded: bool }
 - **Concurrency**: Named threads; bounded channels; `park_timeout` (100ms) for polling.
 - **Exports**: `pub use` re-exports in `mod.rs` files.
 - **No async runtime**: Threads + channels only.
-- **Unix-only**: No Windows support (removed in 0.12.0).
+- **Cross-platform**: Linux, macOS, and Windows supported. Windows consoles report key releases
+  as events; `TerminalEvents` drops them, so handlers only ever see presses. CI runs on Linux only
+  — check other targets with `cargo clippy --workspace --all-targets --target <triple>`.
 
 ---
 
@@ -168,8 +174,8 @@ Exiting { app_loaded: bool }
 
 ### Adding a scan option
 1. Add field to `ScanOptions` in `libdiskonaut/src/scan/mod.rs`
-2. Thread it through **both** walkers: `scan/bulk.rs` (macOS) and the `fallback` module in
-   `scan/mod.rs` (everywhere else). The fallback is `cfg`-selected away on macOS, so it is only
+2. Thread it through **every** walker: `scan/bulk.rs` (macOS), `scan/linux.rs`, `scan/windows.rs`,
+   and the `fallback` module in `scan/mod.rs` (everywhere else). The fallback is `cfg`-selected away on macOS, so it is only
    ever run by its tests here — do not assume compiling it means it works.
 3. Expose via CLI in `diskonaut/src/cli/mod.rs` and config if persistent
 4. Add a `--benchmark` stage if it changes how the walk performs

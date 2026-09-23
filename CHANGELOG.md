@@ -9,10 +9,24 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- Windows support. A native walker reads a directory's sizes, allocation and file ids in bulk
+  (`GetFileInformationByHandleEx`) instead of opening every file: a 609k-entry `D:\` scans in
+  0.4s instead of 34s, a 2M-entry `C:\` in about 8s. Junctions, symbolic links and mounted folders
+  are not followed.
+- `--hard-link-threshold BYTES` (Windows): Windows lists no link count, so hard links are found by
+  tracking files by id, which costs memory. By default only the places hard links are normally
+  made are tracked — the Windows directory, Edge, Docker and Git installs, `node_modules`, pnpm and
+  uv stores. The flag tracks every file of at least that size, everywhere; `1` is exact.
+- `--benchmark` prints each stage's total in exact bytes, so stages can be compared to the byte.
+
 - `--bench-stage tree-only` times the folder tree with the walk taken out of the measurement, so
   the model's cost can be read directly instead of inferred from `walk` against `tree`.
 
 ### Changed
+
+- The benchmark's hard-linked count now counts files seen under more than one name within the
+  scan. A file whose other names lie outside the scanned folder is no longer counted. Sizes are
+  unchanged.
 
 - The folder tree is built on four threads while the scan runs. Each owns a private tree for the
   directories sent to it, the trees are merged once at the end, and hard links and reflinks are
@@ -57,6 +71,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   trustworthy whole-machine total.
 
 ### Fixed
+
+- On Windows, pressing `q` opened the quit prompt and letting go of it answered the prompt, so it
+  had to be held down. Windows consoles report key releases as events of their own; they are now
+  dropped before any handler sees them.
 
 - Directory recursion is filesystem-aware: `/proc`, `/sys`, cgroup, debugfs and the other
   pseudo-filesystems are no longer descended into when a scan crosses a mount point into one. They
