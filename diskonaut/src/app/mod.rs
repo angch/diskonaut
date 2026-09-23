@@ -152,6 +152,9 @@ where
     }
     pub fn show_warning_modal(&mut self) {
         if let Some(file_to_delete) = self.get_file_to_delete() {
+            if self.refuse_metafile(&file_to_delete) {
+                return;
+            }
             self.ui_mode = UiMode::WarningMessage(file_to_delete);
             self.render();
         }
@@ -235,8 +238,26 @@ where
         };
         Some(file_to_delete)
     }
+    /// NTFS's own files are shown so the space they hold is accounted for, not so they can be
+    /// deleted. Say so rather than ask for a confirmation the filesystem would refuse anyway.
+    fn refuse_metafile(&mut self, file_to_delete: &FileToDelete) -> bool {
+        let refuse = libdiskonaut::scan::ntfs::is_metafile_path(
+            &file_to_delete.path_in_filesystem,
+            &file_to_delete.path_to_file,
+        );
+        if refuse {
+            self.ui_mode = UiMode::ErrorMessage(
+                "NTFS metadata belongs to the filesystem and cannot be deleted".to_string(),
+            );
+            self.render();
+        }
+        refuse
+    }
     pub fn prompt_file_deletion(&mut self) {
         if let Some(file_to_delete) = self.get_file_to_delete() {
+            if self.refuse_metafile(&file_to_delete) {
+                return;
+            }
             self.ui_mode = UiMode::DeleteFile(file_to_delete);
             self.render();
         }

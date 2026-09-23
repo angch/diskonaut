@@ -16,12 +16,17 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - `--hard-link-threshold BYTES` (Windows): Windows lists no link count, so hard links are found by
   tracking files by id, which costs memory. By default only the places hard links are normally
   made are tracked — the Windows directory, Edge, Docker and Git installs, `node_modules`, pnpm and
-  uv stores. The flag tracks every file of at least that size, everywhere; `1` is exact.
+  uv stores; run as administrator, every file is. The flag tracks every file of at least that
+  size, everywhere; `1` is exact.
 - `--benchmark` prints each stage's total in exact bytes, so stages can be compared to the byte.
 - A scan of a whole volume shows the volume's used space and how much of it the scan did not find
   (unreadable folders, filesystem metadata, snapshots): `disk used: 424.4G, 108.6G outside the
   scan`. Shown for drive roots on Windows and for mount points scanned with `-x` on Unix, not in
   apparent-size mode. `--benchmark` prints the volume's used space in its header.
+- Elevated on Windows, a whole-volume scan shows NTFS's own files at the root under their real
+  names — `$MFT`, `$LogFile`, `$Bitmap`, `$Secure`, `$Extend\$UsnJrnl` and the rest — sized from
+  their MFT records. On one `C:\` they held 2.9 GiB, `$MFT` alone 2.7 GiB. They cannot be deleted
+  from the app.
 - Elevated on Windows, the scan turns on the backup privilege, so it reads folders whose permissions
   refuse even administrators: `System Volume Information`, other users' profiles, `WindowsApps`.
 

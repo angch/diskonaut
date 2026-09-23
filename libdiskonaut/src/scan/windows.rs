@@ -181,6 +181,11 @@ fn volume_of(handle: &Handle) -> (u64, bool) {
 /// wherever it is. An untracked link is counted once per name, which overstates, never
 /// understates.
 ///
+/// Elevated, every file is tracked. The list was drawn from what an unelevated scan can see, and
+/// an elevated one also reaches other users' profiles, `WindowsApps` and `System Volume
+/// Information`: on that `C:\` they held another 10,041 hard-linked files, and tracking hot spots
+/// alone left 3.1 GiB counted twice, enough to push the total past the volume's used space.
+///
 /// Only volumes whose ids are known to be stable are tracked: NTFS and ReFS. A filesystem driver
 /// that reports one id for every file would otherwise have its equal-sized files merged into one.
 mod links {
@@ -238,6 +243,241 @@ mod links {
     }
 }
 
+/// NTFS's metadata files, sized from their MFT records (see [`crate::scan::ntfs`]).
+///
+/// Reading a record takes the volume opened for reading, which only an administrator may do, so
+/// unelevated this finds nothing and the scan is as it was.
+mod metafiles {
+    use super::{Handle, ffi, layout, read_u32, read_u64};
+    use crate::scan::ntfs;
+    use crate::scan::{DirEntries, EntryMeta};
+    use ::std::ffi::OsString;
+    use ::std::os::windows::ffi::OsStringExt;
+    use ::std::path::{Component, Path, Prefix};
+    use ::std::sync::Arc;
+
+    const GENERIC_READ: u32 = 0x8000_0000;
+    const FSCTL_GET_NTFS_VOLUME_DATA: u32 = 0x0009_0064;
+    const FSCTL_GET_NTFS_FILE_RECORD: u32 = 0x0009_0068;
+
+    #[link(name = "kernel32")]
+    #[allow(non_snake_case)]
+    unsafe extern "system" {
+        fn DeviceIoControl(
+            hDevice: ffi::HANDLE,
+            dwIoControlCode: u32,
+            lpInBuffer: *const u8,
+            nInBufferSize: u32,
+            lpOutBuffer: *mut u8,
+            nOutBufferSize: u32,
+            lpBytesReturned: *mut u32,
+            lpOverlapped: *mut u8,
+        ) -> i32;
+    }
+
+    fn control(handle: &Handle, code: u32, input: &[u8], output: &mut [u8]) -> Option<usize> {
+        let mut returned = 0u32;
+        // SAFETY: both buffers are live for the call and their lengths are the ones passed.
+        let ok = unsafe {
+            DeviceIoControl(
+                handle.0,
+                code,
+                input.as_ptr(),
+                input.len() as u32,
+                output.as_mut_ptr(),
+                output.len() as u32,
+                &raw mut returned,
+                ::std::ptr::null_mut(),
+            )
+        };
+        (ok != 0).then_some(returned as usize)
+    }
+
+    /// The volume a drive-letter root is on, opened to read MFT records.
+    struct Volume {
+        handle: Handle,
+        record_bytes: usize,
+        cluster_bytes: u64,
+        /// The volume's size, which no one file can exceed: a guard against misreading a record.
+        volume_bytes: u64,
+    }
+
+    impl Volume {
+        fn open(root: &Path) -> Option<Volume> {
+            let Some(Component::Prefix(prefix)) = root.components().next() else {
+                return None;
+            };
+            let letter = match prefix.kind() {
+                Prefix::VerbatimDisk(letter) | Prefix::Disk(letter) => char::from(letter),
+                _ => return None,
+            };
+            let device = format!(r"\\.\{letter}:");
+            let handle = Handle::open(Path::new(&device), GENERIC_READ, false)?;
+            // `NTFS_VOLUME_DATA_BUFFER`: `BytesPerFileRecordSegment` is at 48. ReFS and FAT refuse
+            // the call, which is how they are told apart from NTFS here.
+            let mut data = [0u8; 128];
+            control(&handle, FSCTL_GET_NTFS_VOLUME_DATA, &[], &mut data)?;
+            // `NTFS_VOLUME_DATA_BUFFER`: total clusters at 16, bytes per cluster at 44, bytes per
+            // file record at 48.
+            let record_bytes = read_u32(&data, 48) as usize;
+            let cluster_bytes = u64::from(read_u32(&data, 44));
+            let volume_bytes = read_u64(&data, 16).saturating_mul(cluster_bytes);
+            ((512..=65536).contains(&record_bytes) && cluster_bytes > 0).then_some(Volume {
+                handle,
+                record_bytes,
+                cluster_bytes,
+                volume_bytes,
+            })
+        }
+
+        fn record(&self, number: u64) -> Option<ntfs::Record> {
+            // `NTFS_FILE_RECORD_OUTPUT_BUFFER`: the reference returned, the record's length, then
+            // the record. A record not in use is answered with the nearest one below it, so the
+            // number that comes back is checked.
+            let mut output = vec![0u8; 12 + self.record_bytes];
+            control(
+                &self.handle,
+                FSCTL_GET_NTFS_FILE_RECORD,
+                &number.to_le_bytes(),
+                &mut output,
+            )?;
+            if ntfs::record_number(read_u64(&output, 0)) != number {
+                return None;
+            }
+            let length = (read_u32(&output, 8) as usize).min(self.record_bytes);
+            ntfs::parse_record(&output[12..12 + length])
+        }
+
+        /// Bytes allocated to the file whose base record is `number`, extension records included.
+        fn allocated(&self, number: u64) -> Option<u64> {
+            let base = self.record(number)?;
+            let extensions: u64 = base
+                .extensions
+                .iter()
+                .filter_map(|&extension| self.record(extension))
+                .map(|record| record.clusters)
+                .sum();
+            let bytes = (base.clusters + extensions).saturating_mul(self.cluster_bytes);
+            (bytes <= self.volume_bytes).then_some(bytes)
+        }
+    }
+
+    fn file(size: u64) -> EntryMeta {
+        EntryMeta {
+            size,
+            inode: 0,
+            links: 1,
+            is_dir: false,
+            shared_extent: 0,
+        }
+    }
+
+    /// A directory's entries as names, file references and whether each is a directory.
+    fn list(path: &Path) -> Vec<(OsString, u64, bool)> {
+        let mut found = Vec::new();
+        let Some(handle) = Handle::open(path, ffi::FILE_LIST_DIRECTORY, true) else {
+            return found;
+        };
+        let mut buffer = vec![0u64; 8192];
+        loop {
+            // SAFETY: `buffer` is live, 8-byte aligned and as long as the size passed.
+            let ok = unsafe {
+                ffi::GetFileInformationByHandleEx(
+                    handle.0,
+                    ffi::FILE_ID_EXTD_DIRECTORY_INFO,
+                    buffer.as_mut_ptr().cast(),
+                    (buffer.len() * 8) as u32,
+                )
+            };
+            if ok == 0 {
+                return found;
+            }
+            // SAFETY: reinterpreting a `u64` buffer as bytes is always sound.
+            let bytes = unsafe {
+                ::std::slice::from_raw_parts(buffer.as_ptr().cast::<u8>(), buffer.len() * 8)
+            };
+            let mut at = 0;
+            loop {
+                let entry = &bytes[at..];
+                let next = read_u32(entry, layout::NEXT_ENTRY_OFFSET) as usize;
+                let name_length = read_u32(entry, layout::FILE_NAME_LENGTH) as usize;
+                let name: Vec<u16> = entry
+                    [layout::EXTD_FILE_NAME..layout::EXTD_FILE_NAME + name_length]
+                    .as_chunks::<2>()
+                    .0
+                    .iter()
+                    .map(|pair| u16::from_le_bytes(*pair))
+                    .collect();
+                let is_dir =
+                    read_u32(entry, layout::FILE_ATTRIBUTES) & ffi::FILE_ATTRIBUTE_DIRECTORY != 0;
+                if name != [u16::from(b'.')] && name != [u16::from(b'.'); 2] {
+                    let reference = read_u64(entry, layout::EXTD_FILE_ID);
+                    found.push((OsString::from_wide(&name), reference, is_dir));
+                }
+                if next == 0 {
+                    break;
+                }
+                at += next;
+            }
+        }
+    }
+
+    /// What the walk adds for a volume's metadata files.
+    pub struct Metafiles {
+        /// Entries for the root directory: the root metafiles, and `$Extend` as a directory.
+        pub root: Vec<(OsString, EntryMeta)>,
+        /// `$Extend` and the directories below it, each as its own directory.
+        pub directories: Vec<DirEntries>,
+    }
+
+    /// Size the metadata files of the volume whose root is `root`, or `None` if its records
+    /// cannot be read: not NTFS, not a drive letter, or not elevated.
+    pub fn collect(root: &Path, with_extend: bool) -> Option<Metafiles> {
+        let volume = Volume::open(root)?;
+        let mut metafiles = Metafiles {
+            root: Vec::new(),
+            directories: Vec::new(),
+        };
+        for &(number, name) in ntfs::ROOT_METAFILES {
+            if let Some(size) = volume.allocated(number) {
+                metafiles.root.push((OsString::from(name), file(size)));
+            }
+        }
+        if with_extend {
+            let extend = root.join(ntfs::EXTEND);
+            let mut pending = vec![extend];
+            while let Some(path) = pending.pop() {
+                let mut directory = DirEntries::new(Arc::from(path.as_path()));
+                for (name, reference, is_dir) in list(&path) {
+                    if is_dir {
+                        pending.push(path.join(&name));
+                        directory.push(
+                            &name,
+                            EntryMeta {
+                                is_dir: true,
+                                ..file(0)
+                            },
+                        );
+                    } else if let Some(size) = volume.allocated(ntfs::record_number(reference)) {
+                        directory.push(&name, file(size));
+                    }
+                }
+                metafiles.directories.push(directory);
+            }
+            if !metafiles.directories.is_empty() {
+                metafiles.root.push((
+                    OsString::from(ntfs::EXTEND),
+                    EntryMeta {
+                        is_dir: true,
+                        ..file(0)
+                    },
+                ));
+            }
+        }
+        (!metafiles.root.is_empty()).then_some(metafiles)
+    }
+}
+
 /// One directory waiting to be read.
 struct Job {
     path: Arc<Path>,
@@ -268,6 +508,8 @@ struct Shared {
     hot_paths: Vec<PathBuf>,
     /// Volume serial number, folded into file ids so that ids from two volumes cannot collide.
     volume: u64,
+    /// NTFS's metadata files, for whichever worker reads the root to add to it.
+    metafiles: Mutex<Option<metafiles::Metafiles>>,
 }
 
 impl Shared {
@@ -543,13 +785,24 @@ pub fn walk_windows(root: &Path, threads: usize, options: ScanOptions) -> Window
 
     // Elevated, this lets the walk into every folder, as WizTree's does; unelevated it is a no-op.
     // Once per process: the privilege stays on once enabled.
-    static BACKUP_PRIVILEGE: ::std::sync::Once = ::std::sync::Once::new();
-    BACKUP_PRIVILEGE.call_once(|| {
-        crate::os::enable_backup_privilege();
-    });
+    static BACKUP_PRIVILEGE: ::std::sync::OnceLock<bool> = ::std::sync::OnceLock::new();
+    let elevated = *BACKUP_PRIVILEGE.get_or_init(crate::os::enable_backup_privilege);
+
+    // Elevated, the walk reaches folders the hot spots were never chosen for — other users'
+    // profiles, `WindowsApps`, `System Volume Information` — and on one `C:\` those held 10,041
+    // hard-linked files the default missed, 3.1 GiB counted twice. So an elevated scan tracks every
+    // file, for about 0.3s and 100 MB more there. An explicit threshold still wins.
+    let hard_link_threshold = options.hard_link_threshold.or(elevated.then_some(1));
 
     let (volume, stable_ids) = Handle::open(&root, ffi::FILE_READ_ATTRIBUTES, false)
         .map_or((0, false), |handle| volume_of(&handle));
+
+    // Only a whole-volume scan in disk-usage mode: the files belong to the volume, not to any
+    // folder, and they are blocks, not lengths.
+    let volume_root = crate::os::volume_used(&root).is_some();
+    let metafiles = (volume_root && !options.show_apparent_size)
+        .then(|| metafiles::collect(&root, options.max_depth.is_none_or(|max| max > 1)))
+        .flatten();
 
     let hot_paths = links::hot_paths();
     // A root inside a hot spot is itself one: scanning `C:\Windows\WinSxS` directly must still
@@ -558,7 +811,7 @@ pub fn walk_windows(root: &Path, threads: usize, options: ScanOptions) -> Window
         .components()
         .any(|part| links::is_hot_spot(part.as_os_str()))
         || hot_paths.iter().any(|hot| root.starts_with(hot));
-    let track = stable_ids && (options.hard_link_threshold.is_some() || inside_hot_spot);
+    let track = stable_ids && (hard_link_threshold.is_some() || inside_hot_spot);
 
     let shared = Arc::new(Shared {
         jobs: Mutex::new(vec![Job {
@@ -574,9 +827,10 @@ pub fn walk_windows(root: &Path, threads: usize, options: ScanOptions) -> Window
         stable_ids,
         // Zero bytes allocated — empty, or small enough to live in the MFT record — costs nothing
         // however many names it has, so is never worth a ledger entry.
-        track_from: options.hard_link_threshold.unwrap_or(1).max(1),
+        track_from: hard_link_threshold.unwrap_or(1).max(1),
         hot_paths,
         volume,
+        metafiles: Mutex::new(metafiles),
     });
 
     let (sender, batches): (SyncSender<Vec<DirEntries>>, Receiver<Vec<DirEntries>>) =
@@ -623,7 +877,19 @@ fn worker(
     }
 
     while let Some(job) = local.pop().or_else(|| shared.steal()) {
-        let (directory, children) = read_directory(&job, &options, shared, &mut buffer);
+        let (mut directory, children) = read_directory(&job, &options, shared, &mut buffer);
+        if job.depth == 0 {
+            let metafiles = shared.metafiles.lock().expect("metafiles poisoned").take();
+            if let Some(metafiles) = metafiles {
+                for (name, meta) in &metafiles.root {
+                    directory.push(name, *meta);
+                }
+                for extra in metafiles.directories {
+                    outbox_entries += extra.len().max(1);
+                    outbox.push(extra);
+                }
+            }
+        }
 
         outbox_entries += directory.len().max(1);
         outbox.push(directory);

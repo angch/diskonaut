@@ -62,7 +62,9 @@ file id instead, which costs memory rather than time — about 100 bytes a file.
 By default only the places hard links are normally made are tracked: the Windows directory, Edge,
 Docker and Git installs, and package stores (`node_modules`, pnpm, uv, `.venv`, `site-packages`).
 A link made by hand elsewhere is counted once per name, which overstates rather than understates.
-To track everywhere, pass `--hard-link-threshold BYTES` — every file at least that large is
+Run as administrator, diskonaut tracks every file: it then reaches other users' profiles and
+system folders the list was not drawn from, and on one `C:\` those held 3.1 GiB of links the list
+missed. To track everywhere unelevated, pass `--hard-link-threshold BYTES` — every file at least that large is
 tracked, wherever it is:
 
 ```sh
@@ -92,8 +94,14 @@ On Windows, run diskonaut as administrator to see nearly everything. Elevated, i
 backup privilege, as WizTree does, which lets it read `System Volume Information`, other users'
 profiles and `WindowsApps` whatever their permissions say. It grants reading only: deleting still
 needs ordinary permission. On one `C:\`, unelevated, 192 folders were unreadable and 108.6 GiB of
-the 424.4 GiB in use was outside the scan; elevated, none were, and 1.7 GiB was — NTFS's metadata
-files, which only reading the master file table directly, as WizTree does, counts.
+the 424.4 GiB in use was outside the scan; elevated, none were.
+
+Elevated, a scan of a whole NTFS volume also shows the filesystem's own files at its root, under
+their real names: `$MFT` (the master file table, 2.7 GiB on that `C:\`), `$LogFile`, `$Bitmap`,
+`$Secure`, and `$Extend` with the change journal and the rest in it. No folder lists them, so they
+are read from their master file table records. They are there to account for the space; the app
+will not offer to delete them. What stays outside the scan after that is small: folders' own
+indexes, and files whose directory entries lag behind their size while they are being written.
 
 ## Benchmarking the scan
 

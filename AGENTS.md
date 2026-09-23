@@ -64,6 +64,9 @@ builders that share nothing:
 - `scan/macos.rs` — macOS walker on `getattrlistbulk(2)` (see `docs/scan-performance.md`)
 - `scan/linux.rs` — Linux walker on `getdents64`/`statx`, own thread pool; also the `FS_IOC_FIEMAP`
   reflink probe. `dua-core` is only the fallback for other platforms and the benchmark baseline
+- `scan/ntfs.rs` — NTFS file-record parser: sizes `$MFT` and the other metadata files the Windows
+  walker adds at a volume root when elevated (records fetched with `FSCTL_GET_NTFS_FILE_RECORD`).
+  Platform-independent so its tests run on Linux CI
 - `scan/windows.rs` — Windows walker: one handle per directory, entries read in bulk with
   `GetFileInformationByHandleEx(FileIdExtdDirectoryInfo)`. No listing carries a link count, so
   files in hard-link hot spots (or all files ≥ `--hard-link-threshold`) are sent with

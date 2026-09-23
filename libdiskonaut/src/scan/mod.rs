@@ -18,6 +18,11 @@ pub mod linux;
 #[cfg(windows)]
 pub mod windows;
 
+/// NTFS record parsing. Compiled everywhere so that its tests run everywhere; only the Windows
+/// walker uses it.
+#[cfg_attr(not(windows), allow(dead_code))]
+pub mod ntfs;
+
 /// Options controlling filesystem traversal.
 #[derive(Clone, Copy, Debug)]
 pub struct ScanOptions {
@@ -38,8 +43,9 @@ pub struct ScanOptions {
     /// carry no link count (see `windows::links`).
     ///
     /// `None` tracks every non-empty file, but only in the directories where hard links are
-    /// normally made. `Some(bytes)` tracks every file at least that large, wherever it is. Ignored
-    /// elsewhere: Unix walks get the link count for free.
+    /// normally made — or everywhere, when the process is elevated and so reaches folders that list
+    /// was not drawn from. `Some(bytes)` tracks every file at least that large, wherever it is.
+    /// Ignored elsewhere: Unix walks get the link count for free.
     pub hard_link_threshold: Option<u64>,
 }
 

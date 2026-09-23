@@ -2198,9 +2198,82 @@ Run elevated, on the same `C:\` (`--bench-stage sharded`):
 | unelevated | 2,058,004 | 192 | 315.8 GiB | 424.4 GiB | 108.6 GiB | 8.9s |
 | elevated | 2,456,499 | 0 | 422.9 GiB | 424.6 GiB | 1.7 GiB | 8.8s |
 
-The 1.7 GiB left (0.4%) is what no directory lists: NTFS's metadata files, which only reading the
-master file table counts. The elevated scan is faster than WizTree's 10.72s on the same volume
-while walking 400k more entries than the unelevated one.
+The elevated scan is faster than WizTree's 10.72s on the same volume while walking 400k more
+entries than the unelevated one.
+
+### Where the last 1.7 GiB went
+
+The 1.7 GiB left looked like NTFS's metadata files, but `$MFT` alone turned out to be 2.68 GiB,
+more than the whole gap. So something was also being counted twice. A second temporary diagnostic
+run, elevated, compared every file's directory entry with the file itself, opened each metadata
+file it could, and asked `FSCTL_GET_NTFS_VOLUME_DATA` and `fsutil` for the rest. Tracking every
+hard link exactly (`--hard-link-threshold 1`) widens the gap to 4.15 GiB, and that is explained to
+within 0.3 GiB:
+
+| | GiB | how it was measured |
+| --- | ---: | --- |
+| `$MFT` | 2.679 | opened with the backup privilege; matches `fsutil`'s *Mft Valid Data Length* |
+| stale directory entries | 1.170 | directory entry against the file's own allocation. 0.47 GiB of it is one Delivery Optimization download in progress |
+| directory indexes | 0.682 | `FILE_STANDARD_INFO` on 452k directory handles; the walk counts directories as 0 |
+| other metadata: `$LogFile`, `$Bitmap`, `$Secure`, `$UsnJrnl`… | ≈ 0.15 | estimated: `$Bitmap` is clusters/8, the journal's maximum is 32 MB |
+| reserved clusters | 0.034 | `fsutil`: 8,910 |
+| `$UpCase`, `$AttrDef`, `$MFTMirr`, `$Deleted`, alternate streams | 0.002 | |
+| compressed and sparse files | −0.266 | `GetCompressedFileSizeW` below the allocation counted |
+| **explained** | **4.45** | |
+| **gap, with exact hard links** | **4.15** | the remainder is drift over the minutes between runs |
+
+The double counting was hard links: 3.09 GiB of them, in 10,041 files (79,288 hard-linked files
+with every file tracked, against 69,247 by default). An elevated scan reaches places the hot-spot
+list, built from an unelevated run, does not cover. Nothing else was counted twice. Reserved storage
+holds nothing back, since both reserves are over their guarantee, and CompactOS is not in use
+(alternate streams total 2 MB).
+
+The shadow copies, `hiberfil.sys` and `pagefile.sys` are all counted correctly once the scan can
+read `System Volume Information`.
+
+### NTFS's metadata files in the tree
+
+Elevated, a whole-volume scan now shows the metadata files under their own names at the volume's
+root: `$MFT`, `$LogFile`, `$Bitmap`, `$Secure` and the rest, and a `$Extend` folder holding
+`$UsnJrnl`, `$ObjId`, `$Quota`, `$Reparse` and `$RmMetadata`. Several of them refuse to open by name
+even with the backup privilege (`$LogFile`, `$Bitmap`, `$Boot`, `$BadClus`), and `$Secure` is not
+found by name at all. But every one has an MFT record, and `FSCTL_GET_NTFS_FILE_RECORD` on the
+volume handle returns it to an administrator. `scan/ntfs.rs` counts the clusters a record's
+non-resident attributes occupy, from their run lists: every piece of every attribute, holes
+skipped, with attribute lists followed into extension records.
+
+The first version read each attribute's allocated-size field instead, trusting the sparse flag to
+mark the exceptions. It reported 883.1 GiB for a 424.6 GiB volume. `$BadClus:$Bad` is one hole the
+size of the volume, it claims all of it as allocated, and it carries no sparse flag. Run lists say
+which ranges have clusters behind them, so they get holes, sparse streams and compression right
+whatever the flags say. As a guard against any other misreading, a metadata file larger than the
+volume is dropped rather than counted.
+
+Resident attributes are left out, since they sit inside `$MFT`'s own clusters. The parser is
+platform-independent and tested on hand-built records, `$BadClus`'s shape among them.
+
+`$Extend`'s children have no fixed record numbers, so `$Extend` is listed, which works elevated,
+and each child is sized from the reference its entry carries. The names are reserved at a volume's
+root, so they cannot collide with anything the walk finds, and the app refuses to offer them for
+deletion. Unelevated, the volume cannot be opened for reading and nothing is added.
+
+What this does not cover: directory indexes (0.68 GiB here) and stale directory entries (1.17 GiB)
+are still outside the scan. Counting either would cost a call per directory or per file.
+
+The result, elevated, against 424.7 GiB in use:
+
+| | total | hard-linked | vs used | time |
+| --- | ---: | ---: | ---: | ---: |
+| hot spots tracked | 426.4 GiB | 69,247 | +1.7 GiB | 8.5s |
+| every file tracked (`--hard-link-threshold 1`) | 423.3 GiB | 79,288 | −1.4 GiB | 8.8s |
+
+The metadata files added 2.84 GiB to both runs (3,049,046,320 B with every file tracked), in line
+with `$MFT`'s 2.68 GiB plus the smaller ones. It was the hard links that pushed the
+default past the volume. The hot-spot list was drawn from an unelevated scan, and elevated the
+walk reaches other users' profiles, `WindowsApps` and `System Volume Information`, where 10,041
+more hard-linked files live. So an elevated scan now tracks every file unless told otherwise, for
+0.3s and 0.5s more replay here. The 1.4 GiB left is directory indexes and stale entries, less what
+compression saves: what the accounting above predicted.
 
 ### Known gaps on Windows
 
