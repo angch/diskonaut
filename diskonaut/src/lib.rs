@@ -27,6 +27,7 @@ use ::ratatui::backend::Backend;
 use ratatui::backend::CrosstermBackend;
 use ratatui::crossterm::event::Event as BackEvent;
 use ratatui::crossterm::terminal::{disable_raw_mode, enable_raw_mode};
+use ratatui::crossterm::{cursor::Show, execute};
 
 use app::{App, UiMode};
 use config::DiskonautConfig;
@@ -48,6 +49,24 @@ pub fn run() {
 }
 fn get_stdout() -> io::Result<io::Stdout> {
     Ok(io::stdout())
+}
+
+/// Put the terminal back the way it was found: cooked mode, cursor visible. Idempotent, and it
+/// ignores errors because it runs on the way out when there is nothing left to do about them.
+fn restore_terminal() {
+    let _ = disable_raw_mode();
+    let _ = execute!(io::stdout(), Show);
+}
+
+/// Restores the terminal when it drops — on a normal quit, an early `?` error, or a panic unwinding
+/// through `start`. Without this, any exit that skips the teardown leaves the shell in raw mode
+/// with a hidden cursor, which needs `reset` to fix.
+struct TerminalGuard;
+
+impl Drop for TerminalGuard {
+    fn drop(&mut self) {
+        restore_terminal();
+    }
 }
 
 fn try_main() -> Result<(), Error> {
@@ -95,6 +114,14 @@ fn try_main() -> Result<(), Error> {
     match get_stdout() {
         Ok(stdout) => {
             enable_raw_mode()?;
+            // The guard restores the terminal on every ordinary way out; the panic hook does it
+            // before the message prints, so a panic in any thread cannot leave the shell wedged.
+            let _guard = TerminalGuard;
+            let default_hook = std::panic::take_hook();
+            std::panic::set_hook(Box::new(move |info| {
+                restore_terminal();
+                default_hook(info);
+            }));
             let terminal_backend = CrosstermBackend::new(stdout);
             let terminal_events = TerminalEvents {};
             let folder = opts.resolve_folder()?;
@@ -108,7 +135,6 @@ fn try_main() -> Result<(), Error> {
         }
         Err(_) => return Err(Error::NoStdout),
     }
-    disable_raw_mode()?;
     Ok(())
 }
 
