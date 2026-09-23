@@ -394,9 +394,18 @@ pub mod parallel {
     use super::{DirEntries, ScanOptions, scan_directories};
     use crate::model::{FileTree, Folder};
 
-    /// Builders to run. Four hides the tree build entirely behind a 24-thread walk on a 32-core
-    /// machine; the curve is flat from there to eight.
+    /// Builders to run.
+    ///
+    /// On fast walkers (Linux, macOS) the tree build is the bottleneck, and four builders hide it
+    /// entirely behind a 24-thread walk on a 32-core machine; the curve is flat from there to
+    /// eight. On Windows the walk is the bottleneck — a handle per directory — so a single builder
+    /// keeps pace, and one shard skips the deferral, merge, and replay a parallel build needs (see
+    /// [`build_tree`]), matching the plain pipeline instead of paying for parallelism that a
+    /// walk-bound volume cannot use. See `docs/scan-performance.md`.
+    #[cfg(not(windows))]
     pub const SHARDS: usize = 4;
+    #[cfg(windows)]
+    pub const SHARDS: usize = 1;
 
     /// Path components that decide a directory's builder.
     ///
@@ -448,6 +457,12 @@ pub mod parallel {
         let root = root.canonicalize().unwrap_or_else(|_| root.to_path_buf());
         let start = Instant::now();
 
+        // A single builder sees the whole tree, so no hard link can span shards and it can charge
+        // shared blocks inline exactly as the serial walk does. Deferring would only add a serial
+        // merge and replay after the walk — on a walk-bound volume, pure overhead with no build
+        // parallelism to pay for it.
+        let deferring = shards > 1;
+
         let mut senders = Vec::with_capacity(shards);
         let mut builders = Vec::with_capacity(shards);
         for index in 0..shards {
@@ -458,7 +473,11 @@ pub mod parallel {
             let builder = thread::Builder::new()
                 .name(format!("tree_builder_{index}"))
                 .spawn(move || {
-                    let mut tree = FileTree::deferring_shared_blocks(Folder::new(&root), root);
+                    let mut tree = if deferring {
+                        FileTree::deferring_shared_blocks(Folder::new(&root), root)
+                    } else {
+                        FileTree::new(Folder::new(&root), root)
+                    };
                     while let Ok(batch) = receiver.recv() {
                         for directory in batch {
                             tree.add_dir_entries(directory);

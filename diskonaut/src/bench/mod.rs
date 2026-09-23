@@ -5,8 +5,10 @@
 //!
 //! * `*-walk` — traversal alone, with entries dropped as they arrive.
 //! * `*-tree` — traversal plus building the in-memory folder tree on the consuming thread.
-//! * `pipeline` — traversal on worker threads and tree building on another, across the same
-//!   channel the real app uses. This is what the app's loading time actually costs.
+//! * `pipeline` — traversal on worker threads and one tree builder on another, across a channel.
+//! * `sharded` — traversal feeding several tree builders, then a merge and a replay. This is what
+//!   the app runs (`parallel::build_tree`); its default shard count is the app's. On a walk-bound
+//!   volume where one builder keeps pace, `sharded` at one shard reduces to `pipeline`.
 //!
 //! The `dua-*` stages measure the general-purpose `dua-core` walker, the others the walker the app
 //! now uses. Comparing them is the point: they scan the same tree, so the difference is the walker.

@@ -2289,6 +2289,28 @@ compression saves: what the accounting above predicted.
 - The `dua-*` benchmark stages on Windows still open every file for its link count, so they
   overstate what `dua-core` itself costs there.
 
+### The shard count, and why Windows uses one (2026-09-23)
+
+`parallel::build_tree` shards the tree build across `SHARDS` threads, defers every shared-block
+sighting, then merges the partial trees and replays the deferrals to settle hard links that might
+span shards. That is the right trade when the walk is faster than one builder — Linux and macOS,
+where four builders hide behind a 24-thread walk. Windows is the opposite: a handle per directory
+makes the walk the bottleneck, so one builder already keeps pace and the extra shards only add a
+serial tail after the walk.
+
+Measured on `D:\` (3.0 TiB, 414,583 entries, warm), the `walk+build` phase is flat across one, two,
+and four shards at ~0.14s — the build is entirely hidden either way — while `merge` grows ~0.5 ms
+per shard and `replay` is a shard-independent ~7–9 ms. That tail was the whole gap between the
+`sharded` stage (~0.155s) and `pipeline` (~0.145s).
+
+Two changes closed it. `build_tree` now builds a **non-deferring** tree when `shards == 1`: a lone
+builder sees the whole tree, so no hard link can cross a shard and it charges inline exactly as the
+single-threaded `scan_into_tree` does — no deferral, no merge, no replay. And `SHARDS` is now `1` on
+Windows (`4` elsewhere). The default `sharded` stage — which is the app's real load path
+(`parallel::build_tree`, not `pipeline`, despite an earlier benchmark comment that said otherwise) —
+now reports `merge 0.000s  replay 0.000s` and matches `pipeline`. `single_shard_build_matches_the_single_threaded_tree`
+pins the one-shard path to the reference tree over a fixture that holds a hard link.
+
 ## Known gaps
 
 > The two Linux sections above that end "the model is the bottleneck" are superseded: the model is

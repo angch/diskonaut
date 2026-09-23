@@ -830,6 +830,45 @@ fn parallel_build_matches_the_single_threaded_tree() {
     );
 }
 
+/// A single shard skips deferral and charges shared blocks inline, so it must land on exactly the
+/// single-threaded tree even when the fixture holds a hard link — the case deferral exists for.
+#[test]
+fn single_shard_build_matches_the_single_threaded_tree() {
+    let dir = temp_scan_dir("single_shard_build");
+    let a = dir.join("a");
+    let b = dir.join("b");
+    std::fs::create_dir_all(&a).expect("mkdir a");
+    std::fs::create_dir_all(&b).expect("mkdir b");
+    let original = a.join("file");
+    File::create(&original)
+        .expect("create file")
+        .write_all(&[0u8; 4096])
+        .expect("write file");
+    std::fs::hard_link(&original, b.join("link")).expect("hard link b/link");
+
+    let options = ScanOptions {
+        show_apparent_size: true,
+        hard_link_threshold: TRACK_EVERY_LINK,
+        ..ScanOptions::default()
+    };
+    let (single, single_failed) = scan_into_tree(&dir, options);
+    let (sharded, failed, _) = crate::scan::parallel::build_tree(&dir, options, 1, 1, |_| true)
+        .expect("nothing asked the scan to stop");
+    let _ = std::fs::remove_dir_all(&dir);
+
+    assert_eq!(failed, single_failed);
+    assert_eq!(sharded.get_total_size(), single.get_total_size());
+    assert_eq!(
+        sharded.get_total_descendants(),
+        single.get_total_descendants()
+    );
+    assert_eq!(
+        sharded.hard_linked_files(),
+        single.hard_linked_files(),
+        "the hard link is charged once, inline, without a replay"
+    );
+}
+
 #[test]
 fn parallel_build_stops_when_progress_says_so() {
     let (dir, _) = fixture_tree("parallel_stop");
