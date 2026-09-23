@@ -8,11 +8,20 @@ repository.workspace = true
 homepage.workspace = true
 description.workspace = true
 
-# The package is renamed for the fork, but the binary keeps the `diskonaut` name so the command,
-# the docs, and the benchmark recipes are unchanged.
+# The program lives in the library; the two binaries are thin shims that call `run()`. The fork's
+# own binary carries its name, and `diskonaut` stays as an alias so the old command, the docs, and
+# the benchmark recipes keep working. Both run the same program.
+[lib]
+name = "diskonaut_angch"
+path = "src/lib.rs"
+
+[[bin]]
+name = "diskonaut-angch"
+path = "src/main.rs"
+
 [[bin]]
 name = "diskonaut"
-path = "src/main.rs"
+path = "src/bin/diskonaut.rs"
 
 [features]
 default = []

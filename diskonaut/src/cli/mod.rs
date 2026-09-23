@@ -5,8 +5,11 @@ use clap::Parser;
 use crate::error::Error;
 
 /// Command-line options for `diskonaut`.
+///
+/// `name` fixes the identity shown by `--version` to the fork's, regardless of whether the program
+/// was invoked as `diskonaut-angch` or the `diskonaut` alias.
 #[derive(Parser, Debug, PartialEq, Eq)]
-#[command(name = "diskonaut")]
+#[command(name = "diskonaut-angch", version)]
 pub struct Opt {
     /// The folder to scan
     pub folder: Option<PathBuf>,
