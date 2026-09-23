@@ -24,6 +24,9 @@ struct LinkedFile {
     size: u64,
     /// One entry per distinct folder holding a link, in the order they were found.
     directories: Vec<DirRef>,
+    /// Whether a second name has been seen. A file whose link count was not known
+    /// ([`crate::scan::LINKS_UNKNOWN`]) is tracked from its first name, and may have no other.
+    linked: bool,
 }
 
 /// Charges each hard-linked file to any one folder at most once.
@@ -170,6 +173,7 @@ impl HardLinks {
                     // in full is the conservative half of that trade.
                     return None;
                 }
+                seen.linked = true;
                 let mut deepest = 0;
                 for &existing in &seen.directories {
                     if existing == directory {
@@ -186,16 +190,18 @@ impl HardLinks {
                 slot.insert(LinkedFile {
                     size,
                     directories: vec![directory],
+                    linked: false,
                 });
                 None
             }
         }
     }
 
-    /// Number of distinct hard-linked files the scan has seen, for reporting and tests.
+    /// Number of distinct files the scan has seen under more than one name, for reporting and
+    /// tests. A file whose other names lie outside the scan is not counted.
     #[must_use]
     pub fn tracked(&self) -> usize {
-        self.files.len()
+        self.files.values().filter(|file| file.linked).count()
     }
 
     /// Number of distinct reflinked files the scan has seen, counted once however many copies

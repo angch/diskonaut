@@ -21,6 +21,7 @@ fn scan_folder_finds_files() {
     let file_path = dir.join("a.txt");
     let mut file = File::create(&file_path).expect("create file");
     file.write_all(b"hello").expect("write file");
+    drop(file);
 
     let options = ScanOptions {
         parallel: false,
@@ -48,6 +49,7 @@ fn scan_into_tree_aggregates_sizes() {
     let file_path = dir.join("data.bin");
     let mut file = File::create(&file_path).expect("create file");
     file.write_all(&[0u8; 1024]).expect("write file");
+    drop(file);
 
     let options = ScanOptions {
         parallel: false,
@@ -270,6 +272,10 @@ fn entries_outside_the_scan_root_are_ignored() {
     let _ = std::fs::remove_dir_all(&dir);
 }
 
+/// Windows tracks hard links only in the places they are normally made unless told otherwise,
+/// and a temporary directory is not one of them. Ignored on Unix, which always knows.
+const TRACK_EVERY_LINK: Option<u64> = Some(1);
+
 /// The case that motivates charging a hard-linked file per folder rather than per entry:
 /// `a/a`, `a/b` and `b/a` are all the same 1 KiB file, so `a` holds 1 KiB, `b` holds 1 KiB, and
 /// the root that contains both still holds only 1 KiB.
@@ -291,6 +297,7 @@ fn hard_links_count_once_per_folder() {
 
     let options = ScanOptions {
         show_apparent_size: true,
+        hard_link_threshold: TRACK_EVERY_LINK,
         ..ScanOptions::default()
     };
     let (tree, failed) = scan_into_tree(&dir, options);
@@ -347,6 +354,7 @@ fn hard_links_count_once_per_folder_when_nested() {
 
     let options = ScanOptions {
         show_apparent_size: true,
+        hard_link_threshold: TRACK_EVERY_LINK,
         ..ScanOptions::default()
     };
     let (tree, _) = scan_into_tree(&dir, options);
@@ -380,6 +388,7 @@ fn ordinary_files_are_not_tracked_as_hard_links() {
     let (dir, _) = fixture_tree("no_hard_links");
     let options = ScanOptions {
         show_apparent_size: true,
+        hard_link_threshold: TRACK_EVERY_LINK,
         ..ScanOptions::default()
     };
     let (tree, _) = scan_into_tree(&dir, options);
@@ -403,6 +412,7 @@ fn deleting_every_link_in_a_folder_does_not_underflow() {
 
     let options = ScanOptions {
         show_apparent_size: true,
+        hard_link_threshold: TRACK_EVERY_LINK,
         ..ScanOptions::default()
     };
     let (mut tree, _) = scan_into_tree(&dir, options);
@@ -433,7 +443,24 @@ fn scan_into_tree_follows_symlinked_root_directory() {
         .expect("write file");
     let link = std::env::temp_dir().join("diskonaut_scan_test_symlink_root_link");
     let _ = std::fs::remove_file(&link);
-    std::os::unix::fs::symlink(&dir, &link).expect("create symlink");
+    let _ = std::fs::remove_dir(&link);
+    let res = {
+        #[cfg(unix)]
+        {
+            std::os::unix::fs::symlink(&dir, &link)
+        }
+        #[cfg(windows)]
+        {
+            std::os::windows::fs::symlink_dir(&dir, &link)
+        }
+    };
+    if let Err(e) = res {
+        if e.kind() == std::io::ErrorKind::PermissionDenied {
+            let _ = std::fs::remove_dir_all(&dir);
+            return;
+        }
+        panic!("create symlink: {e}");
+    }
 
     let options = ScanOptions {
         show_apparent_size: true,
@@ -441,6 +468,7 @@ fn scan_into_tree_follows_symlinked_root_directory() {
     };
     let (tree, failed) = scan_into_tree(&link, options);
     let _ = std::fs::remove_file(&link);
+    let _ = std::fs::remove_dir(&link);
     let _ = std::fs::remove_dir_all(&dir);
 
     assert_eq!(failed, 0);
@@ -808,4 +836,86 @@ fn parallel_build_stops_when_progress_says_so() {
     let result = crate::scan::parallel::build_tree(&dir, ScanOptions::default(), 2, 1, |_| false);
     let _ = std::fs::remove_dir_all(&dir);
     assert!(result.is_none(), "a stopped scan yields no tree");
+}
+
+/// Two names for one file in `dir`, of `bytes` bytes, and the scan of `root` with default options.
+#[cfg(windows)]
+fn scan_with_one_hard_link(
+    root: &std::path::Path,
+    dir: &std::path::Path,
+    bytes: usize,
+) -> crate::FileTree {
+    std::fs::create_dir_all(dir).expect("mkdir");
+    File::create(dir.join("one"))
+        .expect("create file")
+        .write_all(&vec![5u8; bytes])
+        .expect("write file");
+    std::fs::hard_link(dir.join("one"), dir.join("two")).expect("hard link");
+    let options = ScanOptions {
+        show_apparent_size: true,
+        ..ScanOptions::default()
+    };
+    let (tree, failed) = scan_into_tree(root, options);
+    assert_eq!(failed, 0);
+    tree
+}
+
+/// By default Windows tracks hard links only where they are normally made, so one made by hand
+/// elsewhere is counted once per name: an overstatement, the documented price of not tracking
+/// every file.
+#[cfg(windows)]
+#[test]
+fn windows_counts_an_untracked_hard_link_per_name() {
+    let root = temp_scan_dir("windows_untracked_link");
+    let tree = scan_with_one_hard_link(&root, &root, 4096);
+    assert_eq!(tree.get_total_size(), 2 * 4096);
+    assert_eq!(tree.hard_linked_files(), 0);
+    let _ = std::fs::remove_dir_all(&root);
+}
+
+/// Below `node_modules`, where pnpm links packages, a hard link is counted once by default.
+#[cfg(windows)]
+#[test]
+fn windows_counts_a_hard_link_in_a_hot_spot_once() {
+    let root = temp_scan_dir("windows_hot_spot_link");
+    let tree = scan_with_one_hard_link(&root, &root.join("Node_Modules").join("pkg"), 4096);
+    assert_eq!(tree.get_total_size(), 4096, "two names, one file");
+    assert_eq!(tree.hard_linked_files(), 1);
+    let _ = std::fs::remove_dir_all(&root);
+}
+
+/// Scanning from inside a hot spot tracks too, though no directory entered on the way down was
+/// named like one.
+#[cfg(windows)]
+#[test]
+fn windows_tracks_below_a_hot_spot_scan_root() {
+    let outer = temp_scan_dir("windows_hot_spot_root");
+    let root = outer.join("node_modules");
+    let tree = scan_with_one_hard_link(&root, &root.join("pkg"), 4096);
+    assert_eq!(tree.get_total_size(), 4096);
+    let _ = std::fs::remove_dir_all(&outer);
+}
+
+/// Files below the threshold are not tracked, so a link among them is counted per name.
+#[cfg(windows)]
+#[test]
+fn windows_threshold_skips_smaller_files() {
+    let root = temp_scan_dir("windows_threshold");
+    std::fs::create_dir_all(&root).expect("mkdir");
+    for (name, bytes) in [("small", 4096usize), ("large", 64 * 1024)] {
+        File::create(root.join(name))
+            .expect("create file")
+            .write_all(&vec![5u8; bytes])
+            .expect("write file");
+        std::fs::hard_link(root.join(name), root.join(format!("{name}-again"))).expect("link");
+    }
+    let options = ScanOptions {
+        show_apparent_size: true,
+        hard_link_threshold: Some(32 * 1024),
+        ..ScanOptions::default()
+    };
+    let (tree, _) = scan_into_tree(&root, options);
+    assert_eq!(tree.get_total_size(), 2 * 4096 + 64 * 1024);
+    assert_eq!(tree.hard_linked_files(), 1);
+    let _ = std::fs::remove_dir_all(&root);
 }

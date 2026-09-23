@@ -2,7 +2,6 @@
 
 use ::std::ffi::OsStr;
 use ::std::num::NonZero;
-use ::std::os::unix::ffi::OsStrExt;
 use ::std::path::{Path, PathBuf};
 use ::std::sync::Arc;
 
@@ -15,6 +14,9 @@ pub mod bulk;
 
 #[cfg(target_os = "linux")]
 pub mod linux;
+
+#[cfg(windows)]
+pub mod windows;
 
 /// Options controlling filesystem traversal.
 #[derive(Clone, Copy, Debug)]
@@ -32,6 +34,13 @@ pub struct ScanOptions {
     /// The scan always declines to enter a filesystem it is already walking by another path,
     /// whatever this is set to, since that would count the same files twice.
     pub one_file_system: bool,
+    /// Which files Windows tracks by id in case they are hard links, since its directory listings
+    /// carry no link count (see `windows::links`).
+    ///
+    /// `None` tracks every non-empty file, but only in the directories where hard links are
+    /// normally made. `Some(bytes)` tracks every file at least that large, wherever it is. Ignored
+    /// elsewhere: Unix walks get the link count for free.
+    pub hard_link_threshold: Option<u64>,
 }
 
 impl Default for ScanOptions {
@@ -42,6 +51,7 @@ impl Default for ScanOptions {
             show_apparent_size: false,
             max_depth: None,
             one_file_system: false,
+            hard_link_threshold: None,
         }
     }
 }
@@ -57,7 +67,8 @@ pub struct EntryMeta {
     pub size: u64,
     /// Filesystem identity, used to charge a hard-linked file to a folder only once.
     pub inode: u64,
-    /// Directory entries pointing at this file; `1` for an ordinary file.
+    /// Directory entries pointing at this file; `1` for an ordinary file, [`LINKS_UNKNOWN`] when
+    /// the walk could not cheaply tell.
     pub links: u64,
     pub is_dir: bool,
     /// An identity for this file's blocks when every one of them is shared with another file
@@ -69,6 +80,16 @@ pub struct EntryMeta {
     /// `nlink == 1` — so without this the same blocks are counted once per copy.
     pub shared_extent: u64,
 }
+
+/// [`EntryMeta::links`] for a file that may have other names, when learning how many would cost
+/// more than tracking it does.
+///
+/// Such a file goes through the hard-link ledger keyed on its `inode`, like a file known to have
+/// several names. The ledger charges a file's first name along its whole path, as it would an
+/// ordinary file, so one that turns out to have only one name is counted exactly as though its
+/// count had been known. Windows lists no link count, so its walker uses this (see
+/// `windows::links`).
+pub const LINKS_UNKNOWN: u64 = u64::MAX;
 
 /// Why a file's blocks might already have been counted elsewhere.
 ///
@@ -176,7 +197,7 @@ impl DirEntries {
     ///
     /// If one directory's names exceed 4 GiB, which no filesystem permits.
     pub fn push(&mut self, name: &OsStr, meta: EntryMeta) {
-        let bytes = name.as_bytes();
+        let bytes = name.as_encoded_bytes();
         let offset = u32::try_from(self.names.len()).expect("a directory's names fit in 4 GiB");
         let len = u32::try_from(bytes.len()).expect("a name fits in 4 GiB");
         self.names.extend_from_slice(bytes);
@@ -186,7 +207,8 @@ impl DirEntries {
     /// The name of an entry belonging to this directory.
     #[must_use]
     pub fn name(&self, entry: &NamedEntry) -> &OsStr {
-        OsStr::from_bytes(&self.names[entry.name_range()])
+        // SAFETY: The slice came from `OsStr::as_encoded_bytes()`.
+        unsafe { OsStr::from_encoded_bytes_unchecked(&self.names[entry.name_range()]) }
     }
 
     #[must_use]
@@ -208,7 +230,8 @@ impl DirEntries {
     pub fn iter(&self) -> impl Iterator<Item = (&OsStr, &EntryMeta)> {
         self.entries.iter().map(|entry| {
             (
-                OsStr::from_bytes(&self.names[entry.name_range()]),
+                // SAFETY: The slice came from `OsStr::as_encoded_bytes()`.
+                unsafe { OsStr::from_encoded_bytes_unchecked(&self.names[entry.name_range()]) },
                 &entry.meta,
             )
         })
@@ -390,12 +413,11 @@ pub mod parallel {
 
     /// Which builder a directory belongs to.
     pub fn shard_of(root: &Path, path: &Path, depth: usize, shards: usize) -> usize {
-        use ::std::os::unix::ffi::OsStrExt;
         let relative = path.strip_prefix(root).unwrap_or(path);
         let depth = if depth == 0 { usize::MAX } else { depth };
         let mut hash: u64 = 0xcbf2_9ce4_8422_2325;
         for component in relative.components().take(depth) {
-            for byte in component.as_os_str().as_bytes() {
+            for byte in component.as_os_str().as_encoded_bytes() {
                 hash = (hash ^ u64::from(*byte)).wrapping_mul(0x0000_0100_0000_01b3);
             }
             // A separator, so that `ab/c` and `a/bc` do not hash alike.
@@ -506,7 +528,8 @@ pub mod parallel {
 ///
 /// On macOS this uses [`bulk`], which asks the kernel only for the attributes disk usage needs.
 /// On Linux it uses [`linux`], which owns its own thread pool because `dua-core`'s stops scaling
-/// well before the kernel does. Elsewhere it groups the `dua-core` walk, which reports a
+/// well before the kernel does. On Windows it uses [`windows`], which reads a directory's sizes
+/// in bulk rather than opening every file. Elsewhere it groups the `dua-core` walk, which reports a
 /// directory's entries consecutively.
 pub fn scan_directories(root: &Path, options: ScanOptions) -> impl Iterator<Item = DirEntries> {
     #[cfg(target_os = "macos")]
@@ -523,7 +546,11 @@ pub fn scan_directories(root: &Path, options: ScanOptions) -> impl Iterator<Item
     {
         linux::walk_linux(root, thread_count(options), options)
     }
-    #[cfg(not(any(target_os = "macos", target_os = "linux")))]
+    #[cfg(windows)]
+    {
+        windows::walk_windows(root, thread_count(options), options)
+    }
+    #[cfg(not(any(target_os = "macos", target_os = "linux", windows)))]
     {
         fallback::group_by_directory(root, options)
     }
@@ -531,7 +558,10 @@ pub fn scan_directories(root: &Path, options: ScanOptions) -> impl Iterator<Item
 
 /// Compiled on every platform, though only selected on platforms that are neither macOS nor
 /// Linux, so that it cannot rot unnoticed. The tests call it directly everywhere.
-#[cfg_attr(any(target_os = "macos", target_os = "linux"), allow(dead_code))]
+#[cfg_attr(
+    any(target_os = "macos", target_os = "linux", windows),
+    allow(dead_code)
+)]
 mod fallback {
     use super::{
         DirEntries, EntryMeta, Options, Order, ScanOptions, descend_predicate, dua_thread_count,
@@ -600,7 +630,11 @@ mod fallback {
                     continue;
                 }
                 let named = metadata.ok().map(|metadata| {
-                    let (inode, links) = entry_identity(&metadata);
+                    let (inode, links) = entry_identity(
+                        Some(&parent_path.join(&file_name)),
+                        file_type.is_dir(),
+                        &metadata,
+                    );
                     EntryMeta {
                         size: entry_size(&metadata, apparent),
                         inode,
@@ -714,7 +748,8 @@ pub fn scan_folder(root: impl AsRef<Path>, options: ScanOptions) -> impl Iterato
             let path = entry.path();
             match entry.metadata {
                 Ok(metadata) => {
-                    let (inode, links) = entry_identity(&metadata);
+                    let (inode, links) =
+                        entry_identity(Some(&path), entry.file_type.is_dir(), &metadata);
                     ScanItem::Entry {
                         path,
                         meta: EntryMeta {
@@ -743,11 +778,9 @@ fn descend_predicate(
     options: ScanOptions,
 ) -> impl Fn(&::dua_core::Entry) -> bool + Send + Sync + 'static {
     let max_depth = options.max_depth;
-    let root_device = options.one_file_system.then(|| {
-        ::std::fs::metadata(root)
-            .map(|metadata| ::std::os::unix::fs::MetadataExt::dev(&metadata))
-            .unwrap_or_default()
-    });
+    let root_device = options
+        .one_file_system
+        .then(|| crate::os::volume_id(root).unwrap_or_default());
     move |entry| {
         if !max_depth.is_none_or(|max| entry.depth < max) {
             return false;
@@ -765,22 +798,55 @@ fn entry_device(metadata: &::dua_core::Metadata) -> u64 {
     metadata.dev()
 }
 
-#[cfg(not(target_os = "macos"))]
+#[cfg(all(unix, not(target_os = "macos")))]
 fn entry_device(metadata: &::dua_core::Metadata) -> u64 {
     use ::std::os::unix::fs::MetadataExt;
     metadata.dev()
 }
 
+#[cfg(windows)]
+fn entry_device(metadata: &::dua_core::Metadata) -> u64 {
+    metadata.hard_link_id().map(|(vol, _)| vol).unwrap_or(0)
+}
+
 /// Inode number and link count, however the platform's metadata spells them.
 #[cfg(target_os = "macos")]
-fn entry_identity(metadata: &::dua_core::Metadata) -> (u64, u64) {
+fn entry_identity(
+    _path: Option<&Path>,
+    _is_dir: bool,
+    metadata: &::dua_core::Metadata,
+) -> (u64, u64) {
     (metadata.ino(), metadata.nlink())
 }
 
-#[cfg(not(target_os = "macos"))]
-fn entry_identity(metadata: &::dua_core::Metadata) -> (u64, u64) {
+#[cfg(all(unix, not(target_os = "macos")))]
+fn entry_identity(
+    _path: Option<&Path>,
+    _is_dir: bool,
+    metadata: &::dua_core::Metadata,
+) -> (u64, u64) {
     use ::std::os::unix::fs::MetadataExt;
     (metadata.ino(), metadata.nlink())
+}
+
+#[cfg(windows)]
+fn entry_identity(
+    path: Option<&Path>,
+    is_dir: bool,
+    metadata: &::dua_core::Metadata,
+) -> (u64, u64) {
+    let id = metadata
+        .hard_link_id()
+        .map(|(_, file_id)| file_id)
+        .unwrap_or(0);
+    let links = if is_dir {
+        1
+    } else if let Some(path) = path {
+        crate::os::link_count(path)
+    } else {
+        1
+    };
+    (id, links)
 }
 
 #[cfg(target_os = "macos")]
@@ -792,7 +858,16 @@ fn entry_size(metadata: &::dua_core::Metadata, apparent: bool) -> u64 {
     }
 }
 
-#[cfg(not(target_os = "macos"))]
+#[cfg(target_os = "windows")]
+fn entry_size(metadata: &::dua_core::Metadata, apparent: bool) -> u64 {
+    if apparent {
+        metadata.len()
+    } else {
+        metadata.allocated_size()
+    }
+}
+
+#[cfg(all(not(target_os = "macos"), not(target_os = "windows")))]
 fn entry_size(metadata: &::dua_core::Metadata, apparent: bool) -> u64 {
     if apparent {
         metadata.len()

@@ -224,6 +224,11 @@ mod hard_links {
             None,
             "the same number under a different identity is a different file"
         );
+        assert_eq!(
+            links.charge(SharedBlocks::Inode(42), 1024, Path::new("b")),
+            Some(0),
+            "a second name for the inode finds only the inode's first"
+        );
         assert_eq!(links.tracked(), 1);
         assert_eq!(links.tracked_reflinks(), 1);
     }
@@ -260,6 +265,8 @@ mod hard_links {
         );
     }
 
+    /// The first name is charged like an ordinary file, and is not yet a hard link: on Windows
+    /// every file in a hot spot is tracked without knowing whether it has another name.
     #[test]
     fn first_sighting_charges_the_whole_path() {
         let mut links = HardLinks::default();
@@ -267,6 +274,8 @@ mod hard_links {
             links.charge(SharedBlocks::Inode(1), 1024, Path::new("a")),
             None
         );
+        assert_eq!(links.tracked(), 0, "one name so far");
+        links.charge(SharedBlocks::Inode(1), 1024, Path::new("b"));
         assert_eq!(links.tracked(), 1);
     }
 

@@ -75,6 +75,7 @@ fn try_main() -> Result<(), Error> {
         show_apparent_size,
         max_depth: opts.max_depth,
         one_file_system: opts.one_file_system,
+        hard_link_threshold: opts.hard_link_threshold,
     };
 
     if opts.benchmark {

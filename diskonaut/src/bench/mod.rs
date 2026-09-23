@@ -85,13 +85,14 @@ impl StageResult {
             String::new()
         };
         println!(
-            "{:<11}{:>8.3}s  {:>11} entries  {:>10.0} entries/s  {:>7} unreadable  {:>10}{}",
+            "{:<11}{:>8.3}s  {:>11} entries  {:>10.0} entries/s  {:>7} unreadable  {:>10} ({} B){}",
             self.stage,
             seconds,
             self.entries,
             rate,
             self.failed,
             human_size(self.total_size),
+            self.total_size,
             format_args!("{hard_linked}{reflinked}"),
         );
     }

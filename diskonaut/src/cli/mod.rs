@@ -19,6 +19,11 @@ pub struct Opt {
     /// Do not cross filesystem boundaries (like `du -x`)
     #[arg(short = 'x', long = "one-file-system")]
     pub one_file_system: bool,
+    /// Windows: count hard links once for every file of at least this many bytes, in every folder.
+    /// Tracking costs about 100 bytes of memory a file, so by default only the places hard links
+    /// are normally made are tracked (the Windows directory, Edge, package stores such as pnpm's)
+    #[arg(long, value_name = "BYTES")]
+    pub hard_link_threshold: Option<u64>,
     /// Scan headlessly and report timings instead of starting the UI
     #[arg(long)]
     pub benchmark: bool,

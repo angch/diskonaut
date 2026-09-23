@@ -131,7 +131,7 @@ impl FileTree {
         let path_to_delete = &file_to_delete.path_to_file;
         self.base_folder.delete_path(path_to_delete);
     }
-    /// How many distinct hard-linked files the scan has seen.
+    /// How many distinct files the scan has seen under more than one name.
     pub fn hard_linked_files(&self) -> usize {
         self.hard_links.tracked()
     }

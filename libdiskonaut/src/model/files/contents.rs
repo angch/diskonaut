@@ -18,7 +18,6 @@
 //! of real directory sizes, so almost no folder ever allocates one.
 
 use ::std::ffi::OsStr;
-use ::std::os::unix::ffi::OsStrExt;
 
 use super::hash::FastMap;
 use super::{FileOrFolder, Folder};
@@ -51,7 +50,7 @@ impl Contents {
     }
 
     fn position(&self, name: &OsStr) -> Option<usize> {
-        let wanted = name.as_bytes();
+        let wanted = name.as_encoded_bytes();
         if let Some(index) = &self.index {
             return index.get(wanted).map(|&position| position as usize);
         }
@@ -97,7 +96,10 @@ impl Contents {
     pub fn place(&mut self, offset: u32, len: u32, node: FileOrFolder, absent_only: bool) {
         if absent_only {
             let start = offset as usize;
-            let name = OsStr::from_bytes(&self.names[start..start + len as usize]);
+            // SAFETY: The slice came from `OsStr::as_encoded_bytes()`.
+            let name = unsafe {
+                OsStr::from_encoded_bytes_unchecked(&self.names[start..start + len as usize])
+            };
             if self.position(name).is_some() {
                 return;
             }
@@ -120,7 +122,7 @@ impl Contents {
 
     /// Append an entry, copying its name in. For the paths that hold a name and not a buffer.
     fn push(&mut self, name: &OsStr, node: FileOrFolder) {
-        let bytes = name.as_bytes();
+        let bytes = name.as_encoded_bytes();
         let offset = u32::try_from(self.names.len()).expect("a folder's names fit in 4 GiB");
         let len = u32::try_from(bytes.len()).expect("a name fits in 4 GiB");
         self.names.extend_from_slice(bytes);
@@ -227,7 +229,12 @@ impl Contents {
             match entry.node {
                 FileOrFolder::Folder(incoming) => {
                     let start = offset as usize;
-                    let name = OsStr::from_bytes(&self.names[start..start + len as usize]);
+                    // SAFETY: The slice came from `OsStr::as_encoded_bytes()`.
+                    let name = unsafe {
+                        OsStr::from_encoded_bytes_unchecked(
+                            &self.names[start..start + len as usize],
+                        )
+                    };
                     match self.position(name) {
                         Some(position) => match &mut self.entries[position].node {
                             FileOrFolder::Folder(existing) => existing.merge_from(*incoming),
@@ -249,9 +256,11 @@ impl Contents {
 
     /// Every entry, as a name and what it holds.
     pub fn iter(&self) -> impl Iterator<Item = (&OsStr, &FileOrFolder)> {
-        self.entries
-            .iter()
-            .map(|entry| (OsStr::from_bytes(self.bytes_of(entry)), &entry.node))
+        self.entries.iter().map(|entry| {
+            // SAFETY: The slice came from `OsStr::as_encoded_bytes()`.
+            let name = unsafe { OsStr::from_encoded_bytes_unchecked(self.bytes_of(entry)) };
+            (name, &entry.node)
+        })
     }
 }
 

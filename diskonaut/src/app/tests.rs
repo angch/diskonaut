@@ -58,6 +58,7 @@ fn enter_selected_enters_subfolder() {
     big_in_sub
         .write_all(&vec![b'x'; 8192])
         .expect("write subfolder data");
+    drop(big_in_sub);
     File::create(dir.join("tiny.txt"))
         .expect("create small root file")
         .write_all(b"x")

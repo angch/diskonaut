@@ -50,12 +50,30 @@ fn resolve_folder_resolves_symlinks() {
     std::fs::create_dir_all(&dir).expect("create temp dir");
     let link = std::env::temp_dir().join("diskonaut_cli_symlink_link");
     let _ = std::fs::remove_file(&link);
-    std::os::unix::fs::symlink(&dir, &link).expect("create symlink");
+    let _ = std::fs::remove_dir(&link);
+    let res = {
+        #[cfg(unix)]
+        {
+            std::os::unix::fs::symlink(&dir, &link)
+        }
+        #[cfg(windows)]
+        {
+            std::os::windows::fs::symlink_dir(&dir, &link)
+        }
+    };
+    if let Err(e) = res {
+        if e.kind() == std::io::ErrorKind::PermissionDenied {
+            let _ = std::fs::remove_dir_all(&dir);
+            return;
+        }
+        panic!("create symlink: {e}");
+    }
 
     let opt = Opt::parse_from(["diskonaut", link.to_str().unwrap()]);
     let resolved = opt.resolve_folder().expect("resolve folder");
     let expected = dir.canonicalize().unwrap();
     let _ = std::fs::remove_file(&link);
+    let _ = std::fs::remove_dir(&link);
     let _ = std::fs::remove_dir_all(&dir);
 
     assert_eq!(resolved, expected);
