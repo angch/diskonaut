@@ -636,7 +636,7 @@ mod fallback {
                     // It is not an entry inside the tree being scanned.
                     continue;
                 }
-                let named = metadata.ok().map(|metadata| {
+                let named = metadata.and_then(Result::ok).map(|metadata| {
                     let (inode, links) = entry_identity(
                         Some(&parent_path.join(&file_name)),
                         file_type.is_dir(),
@@ -754,7 +754,7 @@ pub fn scan_folder(root: impl AsRef<Path>, options: ScanOptions) -> impl Iterato
         Ok(entry) => {
             let path = entry.path();
             match entry.metadata {
-                Ok(metadata) => {
+                Some(Ok(metadata)) => {
                     let (inode, links) =
                         entry_identity(Some(&path), entry.file_type.is_dir(), &metadata);
                     ScanItem::Entry {
@@ -768,7 +768,7 @@ pub fn scan_folder(root: impl AsRef<Path>, options: ScanOptions) -> impl Iterato
                         },
                     }
                 }
-                Err(_) => ScanItem::ReadError,
+                Some(Err(_)) | None => ScanItem::ReadError,
             }
         }
         Err(_) => ScanItem::ReadError,
@@ -793,7 +793,7 @@ fn descend_predicate(
             return false;
         }
         match (root_device, &entry.metadata) {
-            (Some(root_device), Ok(metadata)) => entry_device(metadata) == root_device,
+            (Some(root_device), Some(Ok(metadata))) => entry_device(metadata) == root_device,
             _ => true,
         }
     }
