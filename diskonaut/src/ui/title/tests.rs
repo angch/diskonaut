@@ -77,6 +77,23 @@ fn title_shows_space_outside_the_scan() {
     );
 }
 
+/// The title says whether the sizes are on-disk usage (the default) or the logical `-a` length,
+/// so the reader is never left guessing which they are looking at.
+#[test]
+fn title_labels_the_size_mode() {
+    let path = ::std::path::PathBuf::from("C:\\");
+    let on_disk = super::TitleLine::new(scanned(&path), scanned(&path), 0).apparent_size(false);
+    assert!(
+        title_text(on_disk, 160).contains("Total on disk:"),
+        "the default is on-disk usage and should say so"
+    );
+    let apparent = super::TitleLine::new(scanned(&path), scanned(&path), 0).apparent_size(true);
+    assert!(
+        title_text(apparent, 160).contains("Total (apparent):"),
+        "-a shows logical lengths and should say so"
+    );
+}
+
 /// While scanning, most of the volume has simply not been reached yet.
 #[test]
 fn title_hides_space_outside_the_scan_while_scanning() {

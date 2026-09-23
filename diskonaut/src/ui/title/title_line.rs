@@ -21,6 +21,9 @@ pub struct TitleLine<'a> {
     flash_space: bool,
     path_error: bool,
     zoom_level: Option<usize>,
+    /// Whether the sizes shown are logical (`-a`) rather than the on-disk usage the tool reports
+    /// by default. Only changes the label, so the reader knows which they are looking at.
+    apparent_size: bool,
 }
 
 impl<'a> TitleLine<'a> {
@@ -40,7 +43,12 @@ impl<'a> TitleLine<'a> {
             flash_space: false,
             path_error: false,
             zoom_level: None,
+            apparent_size: false,
         }
+    }
+    pub fn apparent_size(mut self, apparent_size: bool) -> Self {
+        self.apparent_size = apparent_size;
+        self
     }
     pub fn show_loading(mut self) -> Self {
         self.show_loading = true;
@@ -124,12 +132,19 @@ impl<'a> Widget for TitleLine<'a> {
                 CellSizeOpt::new(format!("{}", total_size)),
             ]);
         } else {
+            // The default is on-disk usage — the space actually held, after compression and
+            // sparse holes. `-a` switches every size to the logical length; say which is on screen.
+            let total_label = if self.apparent_size {
+                "Total (apparent)"
+            } else {
+                "Total on disk"
+            };
             title_telescope.append_to_left_side(vec![
                 CellSizeOpt::new(format!(
-                    "Total: {} ({} files), freed: {}",
-                    total_size, total_descendants, space_freed
+                    "{}: {} ({} files), freed: {}",
+                    total_label, total_size, total_descendants, space_freed
                 )),
-                CellSizeOpt::new(format!("Total: {}, freed: {}", total_size, space_freed)),
+                CellSizeOpt::new(format!("{}: {}, freed: {}", total_label, total_size, space_freed)),
                 CellSizeOpt::new(format!("Total: {}", total_size)),
                 CellSizeOpt::new(format!("{}", total_size)),
             ]);

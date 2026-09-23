@@ -42,6 +42,9 @@ where
     event_sender: SyncSender<Event>,
     ui_effects: UiEffects,
     pub keybinds: Keybinds,
+    /// Sizes are shown as the logical length rather than on-disk usage. Passed to the title so the
+    /// reader knows which they see; the scan itself decides the figures.
+    show_apparent_size: bool,
 }
 
 impl<B> App<B>
@@ -53,6 +56,7 @@ where
         path_in_filesystem: PathBuf,
         event_sender: SyncSender<Event>,
         keybinds: Keybinds,
+        show_apparent_size: bool,
     ) -> Self {
         let display = Display::new(terminal_backend);
         let board = Board::new(&Folder::new(&path_in_filesystem));
@@ -70,6 +74,7 @@ where
             event_sender,
             ui_effects,
             keybinds,
+            show_apparent_size,
         }
     }
     pub fn start(&mut self, receiver: Receiver<Instruction>) {
@@ -95,6 +100,7 @@ where
             &self.ui_mode,
             &self.ui_effects,
             &self.keybinds,
+            self.show_apparent_size,
         );
     }
     pub fn flash_space_freed(&mut self) {

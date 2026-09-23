@@ -24,6 +24,7 @@ fn test_app(width: u16, height: u16) -> App<TestBackend> {
         dir,
         tx,
         Keybinds::default(),
+        false,
     )
 }
 

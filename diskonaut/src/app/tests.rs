@@ -28,6 +28,7 @@ fn app_with_scanned_dir(dir: &Path, width: u16, height: u16) -> App<TestBackend>
         dir.to_path_buf(),
         tx,
         Keybinds::default(),
+        false,
     );
     let options = ScanOptions {
         parallel: false,
@@ -100,6 +101,7 @@ fn prompt_file_deletion_shows_confirmation() {
         dir.clone(),
         tx,
         Keybinds::default(),
+        false,
     );
     let meta = fs::metadata(&target).expect("metadata");
     let mut scanned = DirEntries::new(std::sync::Arc::from(dir.as_path()));

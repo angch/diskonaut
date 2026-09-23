@@ -142,6 +142,7 @@ fn start<B>(
         path.clone(),
         event_sender,
         keybinds.clone(),
+        scan_options.show_apparent_size,
     );
 
     active_threads.push(

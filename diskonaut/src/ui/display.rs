@@ -48,6 +48,7 @@ where
         ui_mode: &UiMode,
         ui_effects: &UiEffects,
         keybinds: &Keybinds,
+        apparent_size: bool,
     ) {
         self.terminal
             .draw(|f| {
@@ -102,6 +103,7 @@ where
                                 current_path_info,
                                 file_tree.space_freed,
                             )
+                            .apparent_size(apparent_size)
                             .progress_indicator(ui_effects.loading_progress_indicator)
                             .path_error(ui_effects.current_path_is_red)
                             .read_errors(file_tree.failed_to_read)
@@ -136,6 +138,7 @@ where
                                 current_path_info,
                                 file_tree.space_freed,
                             )
+                            .apparent_size(apparent_size)
                             .path_error(ui_effects.current_path_is_red)
                             .flash_space(ui_effects.flash_space_freed)
                             .zoom_level(board.zoom_level)
@@ -170,6 +173,7 @@ where
                                 current_path_info,
                                 file_tree.space_freed,
                             )
+                            .apparent_size(apparent_size)
                             .path_error(ui_effects.current_path_is_red)
                             .zoom_level(board.zoom_level)
                             .read_errors(file_tree.failed_to_read)
@@ -204,6 +208,7 @@ where
                                 current_path_info,
                                 file_tree.space_freed,
                             )
+                            .apparent_size(apparent_size)
                             .path_error(ui_effects.current_path_is_red)
                             .flash_space(ui_effects.flash_space_freed)
                             .zoom_level(board.zoom_level)
@@ -238,6 +243,7 @@ where
                                     current_path_info,
                                     file_tree.space_freed,
                                 )
+                                .apparent_size(apparent_size)
                                 .path_error(ui_effects.current_path_is_red)
                                 .flash_space(ui_effects.flash_space_freed)
                                 .zoom_level(board.zoom_level)
@@ -261,6 +267,7 @@ where
                                     current_path_info,
                                     file_tree.space_freed,
                                 )
+                                .apparent_size(apparent_size)
                                 .progress_indicator(ui_effects.loading_progress_indicator)
                                 .path_error(ui_effects.current_path_is_red)
                                 .zoom_level(board.zoom_level)
@@ -298,6 +305,7 @@ where
                                 current_path_info,
                                 file_tree.space_freed,
                             )
+                            .apparent_size(apparent_size)
                             .progress_indicator(ui_effects.loading_progress_indicator)
                             .path_error(ui_effects.current_path_is_red)
                             .read_errors(file_tree.failed_to_read)
