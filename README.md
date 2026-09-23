@@ -2,6 +2,12 @@
 
 **diskonaut** is an interactive terminal tool for exploring disk usage. Pick a directory, watch a live treemap fill in as files are scanned, drill into folders, and delete what you no longer need—without leaving the terminal.
 
+## About this fork
+
+This fork exists to **explore further performance optimizations for everyday disk-usage scanning across Linux, macOS, and Windows**. Upstream diskonaut is Unix-native; here each platform gets a native, parallel directory walker (including Windows, which is new), and the scan and tree-build pipeline is reworked for speed. `docs/scan-performance.md` records the measurements and the reasoning.
+
+**Caveat:** these changes are largely **not yet battle-tested**. Treat the fork as experimental — sanity-check reported sizes against a tool you trust, and keep backups before deleting anything. The performance direction is the point; hardened, production-grade reliability is not there yet.
+
 ## Features
 
 - **Live scanning** — the treemap updates while the walk is still running
