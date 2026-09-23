@@ -2,11 +2,11 @@ use ::std::path::PathBuf;
 use ::std::sync::mpsc;
 
 use ratatui::backend::TestBackend;
-use ratatui::crossterm::event::{Event, KeyCode, KeyEvent, KeyModifiers};
+use ratatui::crossterm::event::{Event, KeyCode, KeyEvent, KeyEventKind, KeyModifiers};
 
 use super::controls::{
     handle_keypress_delete_file_mode, handle_keypress_exiting_mode, handle_keypress_loading_mode,
-    handle_keypress_normal_mode, handle_keypress_screen_too_small,
+    handle_keypress_normal_mode, handle_keypress_screen_too_small, is_key_release,
 };
 use crate::app::{App, UiMode};
 use crate::config::Keybinds;
@@ -77,4 +77,22 @@ fn delete_mode_n_returns_to_normal() {
     app.ui_mode = UiMode::DeleteFile(file.clone());
     handle_keypress_delete_file_mode(key_char('n'), &mut app, file);
     assert!(matches!(app.ui_mode, UiMode::Normal));
+}
+
+/// Windows reports letting go of a key as an event of its own; only presses may reach a handler.
+#[test]
+fn key_releases_are_not_keypresses() {
+    let release = Event::Key(KeyEvent::new_with_kind(
+        KeyCode::Char('q'),
+        KeyModifiers::NONE,
+        KeyEventKind::Release,
+    ));
+    assert!(is_key_release(&release));
+    assert!(!is_key_release(&key_char('q')));
+    let repeat = Event::Key(KeyEvent::new_with_kind(
+        KeyCode::Char('j'),
+        KeyModifiers::NONE,
+        KeyEventKind::Repeat,
+    ));
+    assert!(!is_key_release(&repeat), "holding a key down still moves");
 }

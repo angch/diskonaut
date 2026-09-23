@@ -1,6 +1,7 @@
 use ::ratatui::backend::Backend;
 use ratatui::crossterm::event::Event;
 use ratatui::crossterm::event::read;
+use ratatui::crossterm::event::{KeyEvent, KeyEventKind};
 
 use crate::App;
 use crate::config::Keybinds;
@@ -12,8 +13,28 @@ pub struct TerminalEvents;
 impl Iterator for TerminalEvents {
     type Item = Event;
     fn next(&mut self) -> Option<Event> {
-        Some(read().unwrap())
+        loop {
+            let event = read().unwrap();
+            if !is_key_release(&event) {
+                return Some(event);
+            }
+        }
     }
+}
+
+/// Whether `event` is a key being let go of.
+///
+/// Windows consoles report a release for every press, where Unix terminals report presses alone.
+/// Every handler here acts on a press, so a release passed on would act twice: `q` would open the
+/// quit prompt on the way down and answer it on the way up.
+pub fn is_key_release(event: &Event) -> bool {
+    matches!(
+        event,
+        Event::Key(KeyEvent {
+            kind: KeyEventKind::Release,
+            ..
+        })
+    )
 }
 
 pub fn handle_keypress_loading_mode<B: Backend>(evt: Event, app: &mut App<B>) {
